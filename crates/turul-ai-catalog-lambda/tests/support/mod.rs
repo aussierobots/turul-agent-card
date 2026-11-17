@@ -9,7 +9,7 @@ use lambda_http::http::Request as Builder;
 use lambda_http::{Body, Request, Response};
 use turul_ai_catalog::parse::parse;
 use turul_ai_catalog_lambda::ServedCatalog;
-use turul_ai_catalog_storage::{CatalogId, InMemoryCatalogStore, WriterId, import};
+use turul_ai_catalog_storage::{CatalogId, ImportMode, InMemoryCatalogStore, WriterId, import};
 
 pub fn request(method: &str, uri: &str) -> Request {
     Builder::builder()
@@ -41,7 +41,14 @@ pub fn catalog_id() -> CatalogId {
 pub fn store_with(document: &str) -> InMemoryCatalogStore {
     let store = InMemoryCatalogStore::new();
     let parsed = parse(document.as_bytes()).expect("fixture parses");
-    block_on(import(&store, &catalog_id(), &parsed, &fixture_writer())).expect("fixture imports");
+    block_on(import(
+        &store,
+        &catalog_id(),
+        &parsed,
+        &fixture_writer(),
+        ImportMode::Merge,
+    ))
+    .expect("fixture imports");
     store
 }
 

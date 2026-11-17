@@ -249,6 +249,12 @@ impl Etag {
         Ok(Etag::of(&preimage))
     }
 
+    /// A version read back from a backend as written.
+    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "dynamodb"))]
+    pub(crate) fn from_stored(etag: String) -> Etag {
+        Etag(etag)
+    }
+
     /// Returns the version as a string slice.
     pub fn as_str(&self) -> &str {
         &self.0

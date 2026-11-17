@@ -97,6 +97,24 @@ impl CatalogStore for Spy {
     fn backend_name(&self) -> &'static str {
         "spy"
     }
+    async fn scan_entries(
+        &self,
+        c: &CatalogId,
+    ) -> Result<Vec<turul_ai_catalog_storage::ScannedEntry>, StoreError> {
+        self.inner.scan_entries(c).await
+    }
+    async fn count_catalog(
+        &self,
+        c: &CatalogId,
+    ) -> Result<turul_ai_catalog_storage::ItemCounts, StoreError> {
+        self.inner.count_catalog(c).await
+    }
+    async fn purge_catalog(
+        &self,
+        c: &CatalogId,
+    ) -> Result<turul_ai_catalog_storage::PurgeReport, StoreError> {
+        self.inner.purge_catalog(c).await
+    }
     async fn put_entry(
         &self,
         catalog: &CatalogId,

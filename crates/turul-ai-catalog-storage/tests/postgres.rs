@@ -177,7 +177,9 @@ impl Env {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos());
-        let database = format!("catalog_{}_{nanos}", std::process::id());
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let database = format!("catalog_{}_{nanos}_{n}", std::process::id());
         // The guard exists before the database does, so a failure still releases the server.
         let env = Env {
             url: format!("postgres://postgres@127.0.0.1:{port}/{database}"),
@@ -249,6 +251,13 @@ parity_checks!(
     same_version_kind_puts_are_accepted,
     deleting_the_last_record_of_a_kind_frees_the_identifier,
     conditional_puts_keep_their_preconditions,
+    purge_removes_every_item_of_the_catalog,
+    purge_of_an_empty_catalog_removes_nothing,
+    count_catalog_is_what_purge_removes,
+    purge_leaves_other_catalogs_untouched,
+    overwrite_replaces_a_record_of_either_mode,
+    overwrite_of_a_missing_key_creates_as_any,
+    scan_entries_matches_list_entries,
 );
 
 /// Checks that need a store they can share, such as with a `Registrar`.
@@ -325,6 +334,15 @@ async fn many_instances_refreshing_one_lease_all_succeed() {
 
 #[tokio::test]
 #[ignore = "needs PostgreSQL"]
+async fn purge_removes_many_entries() {
+    let Some(env) = Env::start("purge_removes_many_entries").await else {
+        return;
+    };
+    parity::purge_removes_many_entries(&env.store().await, 300).await;
+}
+
+#[tokio::test]
+#[ignore = "needs PostgreSQL"]
 async fn backend_is_named() {
     let Some(env) = Env::start("backend_is_named").await else {
         return;
@@ -387,4 +405,55 @@ async fn unknown_stored_mode_is_corrupt_provenance() {
     .unwrap();
     pool.close().await;
     parity::unknown_stored_mode_is_corrupt_provenance(&store, &c, &r, &etag).await;
+}
+
+/// Writes `raw` as an entry row under `c` whose provenance bytes do not read, and returns its
+/// stored version.
+async fn inject_unreadable(
+    env: &Env,
+    c: &turul_ai_catalog_storage::CatalogId,
+    raw: &turul_ai_catalog_storage::EntryRecord,
+) -> turul_ai_catalog_storage::Etag {
+    let etag = turul_ai_catalog_storage::Etag::of(raw.bytes());
+    let pool = sqlx::PgPool::connect(&env.url).await.unwrap();
+    sqlx::query(
+        "INSERT INTO catalog_records (catalog_id, record_key, record, etag, provenance, mode) \
+         VALUES ($1, $2, $3, $4, $5, 'curated')",
+    )
+    .bind(c.as_str())
+    .bind(raw.record_key().unwrap().as_str())
+    .bind(raw.bytes())
+    .bind(etag.as_str())
+    .bind(b"{}".as_slice())
+    .execute(&pool)
+    .await
+    .unwrap();
+    pool.close().await;
+    etag
+}
+
+#[tokio::test]
+#[ignore = "needs PostgreSQL"]
+async fn unreadable_items_are_scanned_and_overwritten() {
+    let Some(env) = Env::start("unreadable_items_are_scanned_and_overwritten").await else {
+        return;
+    };
+    let c = common::catalog("unreadable");
+    let raw = common::record("urn:air:raw", None);
+    let store = env.store().await;
+    let etag = inject_unreadable(&env, &c, &raw).await;
+    parity::unreadable_items_are_scanned_and_overwritten(&store, &c, &raw, &etag).await;
+}
+
+#[tokio::test]
+#[ignore = "needs PostgreSQL"]
+async fn unreadable_items_are_counted_and_purged() {
+    let Some(env) = Env::start("unreadable_items_are_counted_and_purged").await else {
+        return;
+    };
+    let c = common::catalog("unreadable");
+    let raw = common::record("urn:air:raw", None);
+    let store = env.store().await;
+    inject_unreadable(&env, &c, &raw).await;
+    parity::unreadable_items_are_counted_and_purged(&store, &c, &raw).await;
 }

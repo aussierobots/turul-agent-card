@@ -19,7 +19,7 @@ use aws_sdk_dynamodb::types::{
 use turul_ai_catalog::parse::parse;
 use turul_ai_catalog_storage::{
     AssembleError, CatalogId, CatalogStore, Condition, DynamoDbCatalogStore, EntryRecord, Etag,
-    ProvenanceError, StoreError, assemble, import,
+    ImportMode, ProvenanceError, StoreError, assemble, import,
 };
 
 const ENDPOINT: &str = "TURUL_AI_CATALOG_DYNAMODB_ENDPOINT";
@@ -269,6 +269,13 @@ parity_checks!(
     same_version_kind_puts_are_accepted,
     deleting_the_last_record_of_a_kind_frees_the_identifier,
     conditional_puts_keep_their_preconditions,
+    purge_removes_every_item_of_the_catalog,
+    purge_of_an_empty_catalog_removes_nothing,
+    count_catalog_is_what_purge_removes,
+    purge_leaves_other_catalogs_untouched,
+    overwrite_replaces_a_record_of_either_mode,
+    overwrite_of_a_missing_key_creates_as_any,
+    scan_entries_matches_list_entries,
 );
 
 /// Checks that need a store they can share, such as with a `Registrar`.
@@ -291,6 +298,44 @@ shared_parity_checks!(
     unregister_by_another_writer_is_refused,
     unregister_frees_the_identifier,
 );
+
+#[tokio::test]
+#[ignore = "needs DynamoDB Local"]
+async fn purge_removes_many_entries() {
+    let Some(env) = Env::start("purge_removes_many_entries").await else {
+        return;
+    };
+    parity::purge_removes_many_entries(&env.store(), 300).await;
+}
+
+/// More than 1 MB of items, so the `Query` of a scan, a count and a purge returns several pages.
+#[tokio::test]
+#[ignore = "needs DynamoDB Local"]
+async fn purge_removes_items_across_several_query_pages() {
+    let Some(env) = Env::start("purge_removes_items_across_several_query_pages").await else {
+        return;
+    };
+    let store = env.store();
+    let c = common::catalog("pages");
+    for n in 0..60 {
+        let mut entry = common::entry(&format!("urn:air:big{n}"), None);
+        entry.description = Some("x".repeat(30 * 1024));
+        store
+            .put_entry(
+                &c,
+                &EntryRecord::new(entry).unwrap(),
+                &common::curated(),
+                Condition::Absent,
+            )
+            .await
+            .unwrap();
+    }
+    assert_eq!(store.scan_entries(&c).await.unwrap().len(), 60);
+    let counted = store.count_catalog(&c).await.unwrap();
+    assert_eq!((counted.entries, counted.guards), (60, 60));
+    assert_eq!(store.purge_catalog(&c).await.unwrap().removed, counted);
+    assert!(items_of(&env, &c).await.is_empty());
+}
 
 #[tokio::test]
 #[ignore = "needs DynamoDB Local"]
@@ -527,9 +572,15 @@ async fn old_and_new_format_catalog_ids_share_a_table() {
     let before = items_of(&env, &old).await;
     assert_eq!(before.len(), 5);
 
-    import(&store, &new, &document, &common::writer("operator"))
-        .await
-        .unwrap();
+    import(
+        &store,
+        &new,
+        &document,
+        &common::writer("operator"),
+        ImportMode::Merge,
+    )
+    .await
+    .unwrap();
     let served = assemble(&store, &new, common::now()).await.unwrap();
     assert_eq!(std::str::from_utf8(&served.bytes).unwrap(), EXPECTED);
     assert_eq!(items_of(&env, &old).await, before);
@@ -539,16 +590,12 @@ async fn old_and_new_format_catalog_ids_share_a_table() {
     ));
     assert_eq!(assemble(&store, &new, common::now()).await.unwrap(), served);
 
-    for item in before {
-        env.client
-            .delete_item()
-            .table_name(&env.table)
-            .key("pk", item["pk"].clone())
-            .key("sk", item["sk"].clone())
-            .send()
-            .await
-            .unwrap();
-    }
+    // The purge reads none of the old items, which a read of this release refuses.
+    let removed = store.purge_catalog(&old).await.unwrap().removed;
+    assert_eq!(
+        (removed.host, removed.entries, removed.guards, removed.other),
+        (1, 2, 2, 0)
+    );
     assert!(items_of(&env, &old).await.is_empty());
     assert_eq!(assemble(&store, &new, common::now()).await.unwrap(), served);
 }
@@ -667,4 +714,134 @@ async fn conflicts_on_every_attempt_are_contended() {
         .await;
     assert_eq!(replaced, Err(StoreError::Contended));
     assert_eq!(answered.load(std::sync::atomic::Ordering::SeqCst), 8);
+}
+
+/// Writes `raw` under `c` as an entry item whose provenance bytes do not read, and returns its
+/// stored version.
+async fn put_unreadable_provenance_item(env: &Env, c: &CatalogId, raw: &EntryRecord) -> Etag {
+    let etag = Etag::of(raw.bytes());
+    env.client
+        .put_item()
+        .table_name(&env.table)
+        .item("pk", text(c.as_str()))
+        .item("sk", text(raw.record_key().unwrap().as_str()))
+        .item("record", AttributeValue::B(Blob::new(raw.bytes())))
+        .item("provenance", AttributeValue::B(Blob::new(b"{}".as_slice())))
+        .item("mode", text("curated"))
+        .item("etag", text(etag.as_str()))
+        .send()
+        .await
+        .unwrap();
+    etag
+}
+
+#[tokio::test]
+#[ignore = "needs DynamoDB Local"]
+async fn unreadable_items_are_scanned_and_overwritten() {
+    let Some(env) = Env::start("unreadable_items_are_scanned_and_overwritten").await else {
+        return;
+    };
+    let c = common::catalog("unreadable");
+    let raw = common::record("urn:air:raw", None);
+    let etag = put_unreadable_provenance_item(&env, &c, &raw).await;
+    parity::unreadable_items_are_scanned_and_overwritten(&env.store(), &c, &raw, &etag).await;
+}
+
+#[tokio::test]
+#[ignore = "needs DynamoDB Local"]
+async fn unreadable_items_are_counted_and_purged() {
+    let Some(env) = Env::start("unreadable_items_are_counted_and_purged").await else {
+        return;
+    };
+    let c = common::catalog("unreadable");
+    let raw = common::record("urn:air:raw", None);
+    put_unreadable_provenance_item(&env, &c, &raw).await;
+    parity::unreadable_items_are_counted_and_purged(&env.store(), &c, &raw).await;
+}
+
+/// Items no release writes: an entry item without `provenance` or `mode`, and an item whose sort
+/// key has no known prefix. A scan reports the first as unreadable provenance; a count and a purge
+/// need only keys, so they count the second as `other` and remove both.
+#[tokio::test]
+#[ignore = "needs DynamoDB Local"]
+async fn items_without_provenance_or_a_known_key_are_counted_and_purged() {
+    let Some(env) =
+        Env::start("items_without_provenance_or_a_known_key_are_counted_and_purged").await
+    else {
+        return;
+    };
+    let store = env.store();
+    let c = common::catalog("old");
+    let r = common::record("urn:air:a", None);
+    put_previous_release_item(&env, &c, &r).await;
+    env.client
+        .put_item()
+        .table_name(&env.table)
+        .item("pk", text(c.as_str()))
+        .item("sk", text("x:unknown"))
+        .send()
+        .await
+        .unwrap();
+    store
+        .put_host(&c, &common::host(), Condition::Any)
+        .await
+        .unwrap();
+    let scanned = store.scan_entries(&c).await.unwrap();
+    assert_eq!(scanned.len(), 1);
+    assert_eq!(scanned[0].provenance, Err(ProvenanceError::Missing));
+    assert_eq!(scanned[0].key, r.key());
+    let counted = store.count_catalog(&c).await.unwrap();
+    assert_eq!(
+        (counted.host, counted.entries, counted.guards, counted.other),
+        (1, 1, 1, 1)
+    );
+    assert_eq!(store.purge_catalog(&c).await.unwrap().removed, counted);
+    assert!(items_of(&env, &c).await.is_empty());
+}
+
+/// Route A: `import` in replace mode upgrades, in place, a catalog id holding the previous
+/// release's items, guards included.
+#[tokio::test]
+#[ignore = "needs DynamoDB Local"]
+async fn replace_upgrades_an_old_format_catalog_in_place() {
+    let Some(env) = Env::start("replace_upgrades_an_old_format_catalog_in_place").await else {
+        return;
+    };
+    let store = env.store();
+    let c = common::catalog("old");
+    let document = parse(DOCUMENT.as_bytes()).unwrap();
+    for entry in &document.entries {
+        put_previous_release_item(&env, &c, &EntryRecord::new(entry.clone()).unwrap()).await;
+    }
+    // An entry the new document lacks.
+    put_previous_release_item(&env, &c, &common::record("urn:air:gone", None)).await;
+    import(
+        &store,
+        &c,
+        &document,
+        &common::writer("operator"),
+        ImportMode::Replace { now: common::now() },
+    )
+    .await
+    .unwrap();
+    let served = assemble(&store, &c, common::now()).await.unwrap();
+    assert_eq!(std::str::from_utf8(&served.bytes).unwrap(), EXPECTED);
+    let items = items_of(&env, &c).await;
+    assert!(
+        items
+            .iter()
+            .filter(|i| matches!(i.get("sk"), Some(AttributeValue::S(k)) if k.starts_with("e:")))
+            .all(|i| i.contains_key("provenance") && i.contains_key("mode"))
+    );
+    assert_eq!(store.count_catalog(&c).await.unwrap().entries, 2);
+    // The guard of the deleted entry is gone with it, so its identifier is free.
+    store
+        .put_entry(
+            &c,
+            &common::record("urn:air:gone", Some("1")),
+            &common::curated(),
+            Condition::Absent,
+        )
+        .await
+        .unwrap();
 }

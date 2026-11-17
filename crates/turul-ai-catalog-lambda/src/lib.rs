@@ -12,8 +12,8 @@ use turul_ai_catalog::model::AiCatalog;
 use turul_ai_catalog::timestamp::Timestamp;
 use turul_ai_catalog::validate::Severity;
 use turul_ai_catalog_storage::{
-    AssembleError, CatalogId, CatalogStore, ImportError, InMemoryCatalogStore, Omission, WriterId,
-    assemble, import,
+    AssembleError, CatalogId, CatalogStore, ImportError, ImportMode, InMemoryCatalogStore,
+    Omission, WriterId, assemble, import,
 };
 
 /// Value of the `Allow` header on a 405 response (RFC 9110 section 15.5.6).
@@ -220,7 +220,7 @@ impl ServedCatalog {
             CatalogId::new("default").map_err(|_| ColdStartError::Config("invalid catalog id"))?;
         let writer = WriterId::new(DOCUMENT_WRITER)
             .map_err(|_| ColdStartError::Config("invalid writer id"))?;
-        import(&store, &catalog, document, &writer)
+        import(&store, &catalog, document, &writer, ImportMode::Merge)
             .await
             .map_err(ColdStartError::Import)?;
         Self::assemble(&store, &catalog, SystemTime::now()).await

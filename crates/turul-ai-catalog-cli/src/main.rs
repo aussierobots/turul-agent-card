@@ -94,7 +94,7 @@ enum Command {
         #[arg(long)]
         version: Option<String>,
     },
-    /// List or remove the entries of a catalog held in a store.
+    /// List, remove, import or purge the entries of a catalog held in a store.
     #[command(subcommand)]
     Store(store::StoreCommand),
 }

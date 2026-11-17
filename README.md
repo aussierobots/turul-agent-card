@@ -136,7 +136,9 @@ project owns the table, the function and every grant (IAM, SAM, CDK): the servin
 `dynamodb:GetItem` and `dynamodb:Query`. An importer (`import`, `put_host`, `put_entry`) needs
 `dynamodb:PutItem` and `dynamodb:UpdateItem`; a writer that also removes entries (`delete_entry`)
 adds `dynamodb:DeleteItem`, `dynamodb:ConditionCheckItem` and `dynamodb:GetItem`. Entry writes are
-`TransactWriteItems` calls, which IAM authorises by these per-item actions.
+`TransactWriteItems` calls, which IAM authorises by these per-item actions. The operator's
+`turul-ai-catalog store` commands (`list`, `remove`, `import`, `purge`) need the writer's actions
+and `dynamodb:Query`.
 
 To serve a catalog file on a local HTTP port while developing, run the same handler as a plain
 server:

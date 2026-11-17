@@ -15,7 +15,7 @@ use turul_ai_catalog_lambda::{
 };
 use turul_ai_catalog_storage::{
     AssembleError, CatalogId, CatalogStore, Condition, EntryRecord, Etag, HostRecord, ImportError,
-    InMemoryCatalogStore, Provenance, StoreError, Stored, StoredEntry, import,
+    ImportMode, InMemoryCatalogStore, Provenance, StoreError, Stored, StoredEntry, import,
 };
 
 const SPEC_EXAMPLE: &str = include_str!("fixtures/ai-catalog.json");
@@ -48,6 +48,24 @@ struct Unreachable;
 impl CatalogStore for Unreachable {
     fn backend_name(&self) -> &'static str {
         "unreachable"
+    }
+    async fn scan_entries(
+        &self,
+        _: &CatalogId,
+    ) -> Result<Vec<turul_ai_catalog_storage::ScannedEntry>, StoreError> {
+        Err(StoreError::Backend("unreachable".into()))
+    }
+    async fn count_catalog(
+        &self,
+        _: &CatalogId,
+    ) -> Result<turul_ai_catalog_storage::ItemCounts, StoreError> {
+        Err(StoreError::Backend("unreachable".into()))
+    }
+    async fn purge_catalog(
+        &self,
+        _: &CatalogId,
+    ) -> Result<turul_ai_catalog_storage::PurgeReport, StoreError> {
+        Err(StoreError::Backend("unreachable".into()))
     }
     async fn put_entry(
         &self,
@@ -111,6 +129,24 @@ fn written_before_the_guard() -> WrittenBeforeTheGuard {
 impl CatalogStore for WrittenBeforeTheGuard {
     fn backend_name(&self) -> &'static str {
         "written-before-the-guard"
+    }
+    async fn scan_entries(
+        &self,
+        _: &CatalogId,
+    ) -> Result<Vec<turul_ai_catalog_storage::ScannedEntry>, StoreError> {
+        unreachable!()
+    }
+    async fn count_catalog(
+        &self,
+        _: &CatalogId,
+    ) -> Result<turul_ai_catalog_storage::ItemCounts, StoreError> {
+        unreachable!()
+    }
+    async fn purge_catalog(
+        &self,
+        _: &CatalogId,
+    ) -> Result<turul_ai_catalog_storage::PurgeReport, StoreError> {
+        unreachable!()
     }
     async fn put_entry(
         &self,
@@ -338,7 +374,13 @@ fn non_i_json_numbers_are_refused_before_they_can_be_served() {
     .expect("parses");
     let store = InMemoryCatalogStore::new();
     assert!(matches!(
-        block_on(import(&store, &catalog_id(), &document, &fixture_writer())),
+        block_on(import(
+            &store,
+            &catalog_id(),
+            &document,
+            &fixture_writer(),
+            ImportMode::Merge,
+        )),
         Err(ImportError::Record(_))
     ));
 }

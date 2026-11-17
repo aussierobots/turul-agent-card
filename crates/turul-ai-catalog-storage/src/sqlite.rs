@@ -9,8 +9,9 @@ use crate::ids::{CatalogId, Etag, RecordKey};
 use crate::provenance::{ModeKind, Provenance, ProvenanceError};
 use crate::records::{EntryRecord, HostRecord};
 use crate::store::{
-    CatalogStore, Condition, StoreError, Stored, StoredEntry, corrupt, corrupt_provenance,
-    entry_write, key_error, kind_conflict, stored_entry,
+    CatalogStore, Condition, ItemCounts, PurgeReport, ScannedEntry, StoreError, Stored,
+    StoredEntry, corrupt, corrupt_provenance, entry_write, key_error, kind_conflict, scanned_entry,
+    stored_entry,
 };
 
 const MEMORY: &str = ":memory:";
@@ -97,7 +98,7 @@ impl SqliteCatalogStore {
     ) -> Result<Etag, StoreError> {
         let etag = Etag::of(bytes);
         let sql = match &condition {
-            Condition::Any => {
+            Condition::Any | Condition::Overwrite => {
                 "INSERT INTO catalog_records (catalog_id, record_key, record, etag) \
                  VALUES (?1, ?2, ?3, ?4) \
                  ON CONFLICT (catalog_id, record_key) DO UPDATE \
@@ -240,9 +241,12 @@ impl CatalogStore for SqliteCatalogStore {
             .await
             .map_err(backend)?;
         let (guard_versioned, entries) = lock_guard(&mut tx, catalog, &guard, versioned).await?;
-        let stored = sqlx::query(
-            "SELECT etag, mode FROM catalog_records WHERE catalog_id = ?1 AND record_key = ?2",
-        )
+        // An overwrite checks that a record exists and reads none of it.
+        let stored = sqlx::query(if condition == Condition::Overwrite {
+            "SELECT 1 AS present FROM catalog_records WHERE catalog_id = ?1 AND record_key = ?2"
+        } else {
+            "SELECT etag, mode FROM catalog_records WHERE catalog_id = ?1 AND record_key = ?2"
+        })
         .bind(catalog.as_str())
         .bind(key.as_str())
         .fetch_optional(&mut *tx)
@@ -259,22 +263,25 @@ impl CatalogStore for SqliteCatalogStore {
                         return Err(StoreError::PreconditionFailed);
                     }
                 }
-                let stored_mode: Option<String> = row.try_get("mode").map_err(backend)?;
-                match stored_mode.as_deref().map(ModeKind::from_name) {
-                    Some(Some(stored)) if stored == mode => {}
-                    Some(Some(stored)) => return Err(StoreError::ModeConflict { stored }),
-                    Some(None) => return Err(corrupt_provenance(&key, ProvenanceError::Mode)),
-                    None => return Err(corrupt_provenance(&key, ProvenanceError::Missing)),
+                if condition != Condition::Overwrite {
+                    let stored_mode: Option<String> = row.try_get("mode").map_err(backend)?;
+                    match stored_mode.as_deref().map(ModeKind::from_name) {
+                        Some(Some(stored)) if stored == mode => {}
+                        Some(Some(stored)) => return Err(StoreError::ModeConflict { stored }),
+                        Some(None) => return Err(corrupt_provenance(&key, ProvenanceError::Mode)),
+                        None => return Err(corrupt_provenance(&key, ProvenanceError::Missing)),
+                    }
                 }
                 sqlx::query(
-                    "UPDATE catalog_records SET record = ?3, etag = ?4, provenance = ?5 \
-                     WHERE catalog_id = ?1 AND record_key = ?2",
+                    "UPDATE catalog_records SET record = ?3, etag = ?4, provenance = ?5, \
+                     mode = ?6 WHERE catalog_id = ?1 AND record_key = ?2",
                 )
                 .bind(catalog.as_str())
                 .bind(key.as_str())
                 .bind(record.bytes())
                 .bind(etag.as_str())
                 .bind(provenance_bytes.as_slice())
+                .bind(mode.as_str())
                 .execute(&mut *tx)
                 .await
                 .map_err(backend)?;
@@ -399,5 +406,79 @@ impl CatalogStore for SqliteCatalogStore {
         };
         let record = HostRecord::from_stored(bytes).map_err(|e| corrupt(&RecordKey::HOST, e))?;
         Ok(Some(Stored { record, etag }))
+    }
+
+    async fn scan_entries(&self, catalog: &CatalogId) -> Result<Vec<ScannedEntry>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT record_key, record, etag, provenance FROM catalog_records \
+             WHERE catalog_id = ?1 AND substr(record_key, 1, 2) = ?2",
+        )
+        .bind(catalog.as_str())
+        .bind(RecordKey::ENTRY_PREFIX)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(backend)?;
+        rows.iter()
+            .map(|row| {
+                let name: String = row.try_get("record_key").map_err(backend)?;
+                let etag: String = row.try_get("etag").map_err(backend)?;
+                let bytes: Vec<u8> = row.try_get("record").map_err(backend)?;
+                let provenance: Option<Vec<u8>> = row.try_get("provenance").map_err(backend)?;
+                scanned_entry(
+                    &RecordKey::from_stored_name(name),
+                    bytes,
+                    Etag::from_stored(etag),
+                    provenance.as_deref(),
+                )
+            })
+            .collect()
+    }
+
+    async fn count_catalog(&self, catalog: &CatalogId) -> Result<ItemCounts, StoreError> {
+        let mut counts = ItemCounts::default();
+        for row in sqlx::query("SELECT record_key FROM catalog_records WHERE catalog_id = ?1")
+            .bind(catalog.as_str())
+            .fetch_all(&self.pool)
+            .await
+            .map_err(backend)?
+        {
+            let name: String = row.try_get("record_key").map_err(backend)?;
+            counts.add_key(&name);
+        }
+        let guards = sqlx::query("SELECT guard_key FROM catalog_guards WHERE catalog_id = ?1")
+            .bind(catalog.as_str())
+            .fetch_all(&self.pool)
+            .await
+            .map_err(backend)?;
+        counts.guards += guards.len() as u64;
+        Ok(counts)
+    }
+
+    async fn purge_catalog(&self, catalog: &CatalogId) -> Result<PurgeReport, StoreError> {
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(backend)?;
+        let mut removed = ItemCounts::default();
+        for row in
+            sqlx::query("DELETE FROM catalog_records WHERE catalog_id = ?1 RETURNING record_key")
+                .bind(catalog.as_str())
+                .fetch_all(&mut *tx)
+                .await
+                .map_err(backend)?
+        {
+            let name: String = row.try_get("record_key").map_err(backend)?;
+            removed.add_key(&name);
+        }
+        let guards =
+            sqlx::query("DELETE FROM catalog_guards WHERE catalog_id = ?1 RETURNING guard_key")
+                .bind(catalog.as_str())
+                .fetch_all(&mut *tx)
+                .await
+                .map_err(backend)?;
+        removed.guards += guards.len() as u64;
+        tx.commit().await.map_err(backend)?;
+        Ok(PurgeReport { removed })
     }
 }

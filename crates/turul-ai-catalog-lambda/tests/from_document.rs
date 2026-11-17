@@ -5,7 +5,9 @@ use std::time::SystemTime;
 use futures::executor::block_on;
 use turul_ai_catalog::parse::parse;
 use turul_ai_catalog_lambda::{ColdStartError, ServedCatalog, handle};
-use turul_ai_catalog_storage::{AssembleError, CatalogId, InMemoryCatalogStore, WriterId, import};
+use turul_ai_catalog_storage::{
+    AssembleError, CatalogId, ImportMode, InMemoryCatalogStore, WriterId, import,
+};
 
 mod support;
 use support::{body_bytes, request};
@@ -24,6 +26,7 @@ fn serves_the_same_bytes_as_importing_then_assembling() {
         &id,
         &document,
         &WriterId::new("operator").unwrap(),
+        ImportMode::Merge,
     ))
     .expect("imports");
     let direct =

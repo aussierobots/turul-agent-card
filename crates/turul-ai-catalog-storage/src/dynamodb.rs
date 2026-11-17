@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hasher};
 use std::time::Duration;
@@ -19,8 +20,9 @@ use crate::owned::ATTEMPTS;
 use crate::provenance::{ModeKind, Provenance, ProvenanceError};
 use crate::records::{EntryRecord, HostRecord};
 use crate::store::{
-    CatalogStore, Condition, StoreError, Stored, StoredEntry, corrupt_provenance, entry_write,
-    key_error, kind_conflict, stored_entry,
+    CatalogStore, Condition, ItemCounts, PurgeReport, ScannedEntry, StoreError, Stored,
+    StoredEntry, corrupt_provenance, entry_write, key_error, kind_conflict, scanned_entry,
+    stored_entry,
 };
 
 const ITEM_LIMIT: &str = "record exceeds the DynamoDB item size limit of 400 KB";
@@ -188,7 +190,7 @@ impl DynamoDbCatalogStore {
             .item("record", AttributeValue::B(Blob::new(bytes)))
             .item("etag", s(etag.as_str()));
         match &condition {
-            Condition::Any => {}
+            Condition::Any | Condition::Overwrite => {}
             Condition::Absent => {
                 request = request.condition_expression("attribute_not_exists(pk)");
             }
@@ -250,6 +252,161 @@ impl DynamoDbCatalogStore {
                     _ if e.code() == Some("TransactionConflictException") => {}
                     _ => return Err(backend(e)),
                 },
+            }
+        }
+        Err(StoreError::Contended)
+    }
+
+    /// Replaces the entry item under `item.key` whatever it holds, or creates it with its guard
+    /// when none exists. The old item is never read: the put is conditioned on existence alone, and
+    /// `PutItem` replaces every attribute. An item inside another writer's transaction is retried
+    /// with backoff, up to [`ATTEMPTS`] attempts, then `Contended`.
+    async fn overwrite(
+        &self,
+        catalog: &CatalogId,
+        item: &EntryItem<'_>,
+        guard: &RecordKey,
+    ) -> Result<Etag, StoreError> {
+        for attempt in 0..ATTEMPTS {
+            if attempt > 0 {
+                back_off(attempt).await;
+            }
+            let put = self
+                .client
+                .put_item()
+                .table_name(&self.table)
+                .item("pk", s(catalog.as_str()))
+                .item("sk", s(item.key.as_str()))
+                .item("record", AttributeValue::B(Blob::new(item.record.bytes())))
+                .item(PROVENANCE, AttributeValue::B(Blob::new(item.provenance)))
+                .item(MODE, s(item.mode.as_str()))
+                .item("etag", s(item.etag.as_str()))
+                .condition_expression("attribute_exists(pk)");
+            match put.send().await {
+                Ok(_) => return Ok(item.etag.clone()),
+                Err(e) if condition_failed(&e) => {}
+                // The item is inside another writer's transaction.
+                Err(e) if e.code() == Some("TransactionConflictException") => continue,
+                Err(e) => return Err(backend(e)),
+            }
+            let items = self.create_items(catalog, item, guard)?;
+            let Some(cancelled) = self.transact(items).await? else {
+                return Ok(item.etag.clone());
+            };
+            // An item that appeared meanwhile is replaced on the next attempt.
+            if cancelled.failed(1) {
+                return Err(kind_conflict(item.record));
+            }
+            if !cancelled.failed(0) && !cancelled.conflicted() {
+                return Err(cancelled.into_error());
+            }
+        }
+        Err(StoreError::Contended)
+    }
+
+    /// The transaction that creates an entry item and counts it in its identifier's guard, refused
+    /// when the guard holds the other version kind.
+    fn create_items(
+        &self,
+        catalog: &CatalogId,
+        item: &EntryItem<'_>,
+        guard: &RecordKey,
+    ) -> Result<Vec<TransactWriteItem>, StoreError> {
+        let create = Put::builder()
+            .table_name(&self.table)
+            .item("pk", s(catalog.as_str()))
+            .item("sk", s(item.key.as_str()))
+            .item("record", AttributeValue::B(Blob::new(item.record.bytes())))
+            .item(PROVENANCE, AttributeValue::B(Blob::new(item.provenance)))
+            .item(MODE, s(item.mode.as_str()))
+            .item("etag", s(item.etag.as_str()))
+            .condition_expression("attribute_not_exists(pk)")
+            .build()
+            .map_err(build_error)?;
+        let count = Update::builder()
+            .table_name(&self.table)
+            .key("pk", s(catalog.as_str()))
+            .key("sk", s(guard.as_str()))
+            .update_expression("SET #v = :v ADD #n :one")
+            .condition_expression("attribute_not_exists(pk) OR #v = :v")
+            .expression_attribute_names("#v", VERSIONED)
+            .expression_attribute_names("#n", ENTRIES)
+            .expression_attribute_values(
+                ":v",
+                AttributeValue::Bool(item.record.entry().version.is_some()),
+            )
+            .expression_attribute_values(":one", AttributeValue::N("1".to_string()))
+            .build()
+            .map_err(build_error)?;
+        Ok(vec![
+            TransactWriteItem::builder().put(create).build(),
+            TransactWriteItem::builder().update(count).build(),
+        ])
+    }
+
+    /// One page of the item keys (`sk`) of `catalog` and the key to resume from, `None` after the
+    /// last page. Fetches no other attribute.
+    async fn key_page(
+        &self,
+        catalog: &CatalogId,
+        start: Option<HashMap<String, AttributeValue>>,
+    ) -> Result<(Vec<String>, Option<HashMap<String, AttributeValue>>), StoreError> {
+        let out = self
+            .client
+            .query()
+            .table_name(&self.table)
+            .key_condition_expression("pk = :c")
+            .expression_attribute_values(":c", s(catalog.as_str()))
+            .projection_expression("pk, sk")
+            .consistent_read(true)
+            .set_exclusive_start_key(start)
+            .send()
+            .await
+            .map_err(backend)?;
+        let keys = out
+            .items()
+            .iter()
+            .map(|item| match item.get("sk") {
+                Some(AttributeValue::S(name)) => Ok(name.clone()),
+                _ => Err(StoreError::Backend(
+                    "item has no string `sk` attribute".to_string(),
+                )),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((keys, out.last_evaluated_key().map(ToOwned::to_owned)))
+    }
+
+    /// Deletes the item under `sk` if it exists; `false` when it did not (another writer removed
+    /// it). An item inside another writer's transaction, or a throttled request, is retried with
+    /// backoff, up to [`ATTEMPTS`] attempts, then `Contended`.
+    async fn delete_existing(&self, catalog: &CatalogId, sk: &str) -> Result<bool, StoreError> {
+        for attempt in 0..ATTEMPTS {
+            if attempt > 0 {
+                back_off(attempt).await;
+            }
+            match self
+                .client
+                .delete_item()
+                .table_name(&self.table)
+                .key("pk", s(catalog.as_str()))
+                .key("sk", s(sk))
+                .condition_expression("attribute_exists(pk)")
+                .send()
+                .await
+            {
+                Ok(_) => return Ok(true),
+                Err(e) if condition_failed(&e) => return Ok(false),
+                Err(e)
+                    if matches!(
+                        e.code(),
+                        Some(
+                            "TransactionConflictException"
+                                | "ThrottlingException"
+                                | "ProvisionedThroughputExceededException"
+                                | "RequestLimitExceeded"
+                        )
+                    ) => {}
+                Err(e) => return Err(backend(e)),
             }
         }
         Err(StoreError::Contended)
@@ -364,44 +521,14 @@ impl CatalogStore for DynamoDbCatalogStore {
             return self.replace(catalog, &item, Some(expected)).await;
         }
         let guard = RecordKey::guard(&record.entry().identifier).map_err(key_error)?;
+        if condition == Condition::Overwrite {
+            return self.overwrite(catalog, &item, &guard).await;
+        }
         for attempt in 0..ATTEMPTS {
             if attempt > 0 {
                 back_off(attempt).await;
             }
-            let create = Put::builder()
-                .table_name(&self.table)
-                .item("pk", s(catalog.as_str()))
-                .item("sk", s(key.as_str()))
-                .item("record", AttributeValue::B(Blob::new(record.bytes())))
-                .item(
-                    PROVENANCE,
-                    AttributeValue::B(Blob::new(provenance_bytes.as_slice())),
-                )
-                .item(MODE, s(item.mode.as_str()))
-                .item("etag", s(etag.as_str()))
-                .condition_expression("attribute_not_exists(pk)")
-                .build()
-                .map_err(build_error)?;
-            // A new entry is refused when its identifier's guard holds the other version kind.
-            let count = Update::builder()
-                .table_name(&self.table)
-                .key("pk", s(catalog.as_str()))
-                .key("sk", s(guard.as_str()))
-                .update_expression("SET #v = :v ADD #n :one")
-                .condition_expression("attribute_not_exists(pk) OR #v = :v")
-                .expression_attribute_names("#v", VERSIONED)
-                .expression_attribute_names("#n", ENTRIES)
-                .expression_attribute_values(
-                    ":v",
-                    AttributeValue::Bool(record.entry().version.is_some()),
-                )
-                .expression_attribute_values(":one", AttributeValue::N("1".to_string()))
-                .build()
-                .map_err(build_error)?;
-            let items = vec![
-                TransactWriteItem::builder().put(create).build(),
-                TransactWriteItem::builder().update(count).build(),
-            ];
+            let items = self.create_items(catalog, &item, &guard)?;
             let Some(cancelled) = self.transact(items).await? else {
                 return Ok(etag);
             };
@@ -598,5 +725,80 @@ impl CatalogStore for DynamoDbCatalogStore {
         let record = HostRecord::from_stored(bytes)
             .map_err(|e| crate::store::corrupt(&RecordKey::HOST, e))?;
         Ok(Some(Stored { record, etag }))
+    }
+
+    async fn scan_entries(&self, catalog: &CatalogId) -> Result<Vec<ScannedEntry>, StoreError> {
+        let mut scanned = Vec::new();
+        let mut start = None;
+        loop {
+            let out = self
+                .client
+                .query()
+                .table_name(&self.table)
+                .key_condition_expression("pk = :c AND begins_with(sk, :p)")
+                .expression_attribute_values(":c", s(catalog.as_str()))
+                .expression_attribute_values(":p", s(RecordKey::ENTRY_PREFIX))
+                .consistent_read(true)
+                .set_exclusive_start_key(start)
+                .send()
+                .await
+                .map_err(backend)?;
+            for item in out.items() {
+                let name = match item.get("sk") {
+                    Some(AttributeValue::S(name)) => name.clone(),
+                    _ => String::new(),
+                };
+                let etag = match item.get("etag") {
+                    Some(AttributeValue::S(etag)) => Etag::from_stored(etag.clone()),
+                    _ => {
+                        return Err(StoreError::Backend(
+                            "item has no string `etag` attribute".to_string(),
+                        ));
+                    }
+                };
+                scanned.push(scanned_entry(
+                    &RecordKey::from_stored_name(name),
+                    record_bytes(item)?,
+                    etag,
+                    optional_provenance(item).as_deref(),
+                )?);
+            }
+            start = out.last_evaluated_key().map(ToOwned::to_owned);
+            if start.is_none() {
+                return Ok(scanned);
+            }
+        }
+    }
+
+    async fn count_catalog(&self, catalog: &CatalogId) -> Result<ItemCounts, StoreError> {
+        let mut counts = ItemCounts::default();
+        let mut start = None;
+        loop {
+            let (keys, next) = self.key_page(catalog, start).await?;
+            for key in &keys {
+                counts.add_key(key);
+            }
+            if next.is_none() {
+                return Ok(counts);
+            }
+            start = next;
+        }
+    }
+
+    async fn purge_catalog(&self, catalog: &CatalogId) -> Result<PurgeReport, StoreError> {
+        let mut removed = ItemCounts::default();
+        let mut start = None;
+        loop {
+            let (keys, next) = self.key_page(catalog, start).await?;
+            for key in &keys {
+                if self.delete_existing(catalog, key).await? {
+                    removed.add_key(key);
+                }
+            }
+            if next.is_none() {
+                return Ok(PurgeReport { removed });
+            }
+            start = next;
+        }
     }
 }

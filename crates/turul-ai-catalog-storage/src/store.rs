@@ -17,6 +17,10 @@ pub enum Condition {
     Absent,
     /// The record must exist with this version.
     Matches(Etag),
+    /// An entry write replaces whatever record is stored under the key, whatever its mode and
+    /// whether its provenance reads; the old record is never read. On a key with no record it is
+    /// a create, as `Any`. A host write treats it as `Any`.
+    Overwrite,
 }
 
 /// A record and its version.
@@ -37,6 +41,65 @@ pub struct StoredEntry {
     pub provenance: Provenance,
     /// The version of the entry, [`Etag::of_entry`] of the record and its provenance.
     pub etag: Etag,
+}
+
+/// One entry record as [`CatalogStore::scan_entries`] reports it: the key from its bytes, its
+/// stored version, and its provenance or why that does not read.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ScannedEntry {
+    /// The key of the entry in the record bytes.
+    pub key: EntryKey,
+    /// The version as stored.
+    pub etag: Etag,
+    /// The provenance as read, or the reason it does not.
+    pub provenance: Result<Provenance, ProvenanceError>,
+}
+
+/// How many items of a catalog id a backend holds, by kind of backend key.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ItemCounts {
+    /// Host Info items (key `"h"`).
+    pub host: u64,
+    /// Entry items (keys `"e:…"`).
+    pub entries: u64,
+    /// Version-kind guards (keys `"g:…"`).
+    pub guards: u64,
+    /// Items under any other key.
+    pub other: u64,
+}
+
+impl ItemCounts {
+    /// Returns the number of items of every kind.
+    pub fn total(&self) -> u64 {
+        self.host + self.entries + self.guards + self.other
+    }
+
+    /// Counts one item by its backend key.
+    #[cfg(any(
+        feature = "in-memory",
+        feature = "sqlite",
+        feature = "postgres",
+        feature = "dynamodb"
+    ))]
+    pub(crate) fn add_key(&mut self, key: &str) {
+        let kind = if key == RecordKey::HOST.as_str() {
+            &mut self.host
+        } else if key.starts_with(RecordKey::ENTRY_PREFIX) {
+            &mut self.entries
+        } else if key.starts_with(RecordKey::GUARD_PREFIX) {
+            &mut self.guards
+        } else {
+            &mut self.other
+        };
+        *kind += 1;
+    }
+}
+
+/// What [`CatalogStore::purge_catalog`] removed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PurgeReport {
+    /// The items removed, by kind.
+    pub removed: ItemCounts,
 }
 
 /// Why a [`CatalogStore`] operation failed.
@@ -198,6 +261,35 @@ pub trait CatalogStore: Send + Sync {
     /// backend failure.
     async fn get_host(&self, catalog: &CatalogId)
     -> Result<Option<Stored<HostRecord>>, StoreError>;
+
+    /// Returns every entry record of `catalog` with its key, stored version and provenance, a
+    /// provenance that does not read being a value in the result rather than a failure. Order is
+    /// unspecified.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Corrupt`] when record bytes do not parse; [`StoreError::Backend`] on a
+    /// backend failure.
+    async fn scan_entries(&self, catalog: &CatalogId) -> Result<Vec<ScannedEntry>, StoreError>;
+
+    /// Counts the items a [`CatalogStore::purge_catalog`] would remove now, by kind of backend
+    /// key, reading no record bytes, provenance, mode or guard value.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Backend`] on a backend failure.
+    async fn count_catalog(&self, catalog: &CatalogId) -> Result<ItemCounts, StoreError>;
+
+    /// Removes every item stored under `catalog`, whatever its key or contents, reading no record
+    /// bytes, provenance, mode or guard value, and returns how many it removed by kind. Changes no
+    /// other catalog. DynamoDB removes item by item, so a failure part-way leaves the items not
+    /// yet removed and re-running converges.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Contended`] when an item stayed inside other writers' transactions on every
+    /// attempt; [`StoreError::Backend`] on a backend failure.
+    async fn purge_catalog(&self, catalog: &CatalogId) -> Result<PurgeReport, StoreError>;
 }
 
 /// What every backend shares: error builders, the read-back of an entry and the write-side
@@ -247,6 +339,24 @@ mod backend {
             record,
             provenance,
             etag,
+        })
+    }
+
+    /// Builds the scan row of an entry read back from a backend: the key from the record bytes, the
+    /// version as stored, and the provenance as it reads.
+    pub(crate) fn scanned_entry(
+        key: &RecordKey,
+        record_bytes: Vec<u8>,
+        etag: Etag,
+        provenance_bytes: Option<&[u8]>,
+    ) -> Result<ScannedEntry, StoreError> {
+        let record = EntryRecord::from_stored(record_bytes).map_err(|e| corrupt(key, e))?;
+        Ok(ScannedEntry {
+            key: record.key(),
+            etag,
+            provenance: provenance_bytes
+                .ok_or(ProvenanceError::Missing)
+                .and_then(Provenance::parse),
         })
     }
 

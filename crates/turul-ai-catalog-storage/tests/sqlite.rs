@@ -46,6 +46,13 @@ parity_checks!(
     same_version_kind_puts_are_accepted,
     deleting_the_last_record_of_a_kind_frees_the_identifier,
     conditional_puts_keep_their_preconditions,
+    purge_removes_every_item_of_the_catalog,
+    purge_of_an_empty_catalog_removes_nothing,
+    count_catalog_is_what_purge_removes,
+    purge_leaves_other_catalogs_untouched,
+    overwrite_replaces_a_record_of_either_mode,
+    overwrite_of_a_missing_key_creates_as_any,
+    scan_entries_matches_list_entries,
 );
 
 /// Checks that need a store they can share, such as with a `Registrar`.
@@ -95,6 +102,11 @@ async fn concurrent_lease_refreshes_on_one_etag_have_one_winner() {
 async fn many_instances_refreshing_one_lease_all_succeed() {
     let shared: Arc<dyn CatalogStore> = Arc::new(store().await);
     parity::many_instances_refreshing_one_lease_all_succeed(shared).await;
+}
+
+#[tokio::test]
+async fn purge_removes_many_entries() {
+    parity::purge_removes_many_entries(&store().await, 300).await;
 }
 
 #[tokio::test]
@@ -228,5 +240,143 @@ async fn unknown_stored_mode_is_corrupt_provenance() {
     .unwrap();
     raw.close().await.unwrap();
     parity::unknown_stored_mode_is_corrupt_provenance(&store, &c, &r, &etag).await;
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A database file holding an entry row whose provenance bytes do not read, as `raw` under `c`.
+async fn store_with_unreadable_item(
+    test: &str,
+    c: &turul_ai_catalog_storage::CatalogId,
+    raw: &turul_ai_catalog_storage::EntryRecord,
+) -> (
+    SqliteCatalogStore,
+    turul_ai_catalog_storage::Etag,
+    std::path::PathBuf,
+) {
+    use sqlx::Connection;
+
+    let dir = std::env::temp_dir().join(format!("catalog-sqlite-{test}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("catalog.db");
+    let store = SqliteCatalogStore::connect(path.to_str().unwrap())
+        .await
+        .unwrap();
+    let etag = turul_ai_catalog_storage::Etag::of(raw.bytes());
+    let mut conn = sqlx::SqliteConnection::connect(&format!("sqlite://{}", path.display()))
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO catalog_records (catalog_id, record_key, record, etag, provenance, mode) \
+         VALUES (?1, ?2, ?3, ?4, ?5, 'curated')",
+    )
+    .bind(c.as_str())
+    .bind(raw.record_key().unwrap().as_str())
+    .bind(raw.bytes())
+    .bind(etag.as_str())
+    .bind(b"{}".as_slice())
+    .execute(&mut conn)
+    .await
+    .unwrap();
+    conn.close().await.unwrap();
+    (store, etag, dir)
+}
+
+#[tokio::test]
+async fn unreadable_items_are_scanned_and_overwritten() {
+    let c = common::catalog("unreadable");
+    let raw = common::record("urn:air:raw", None);
+    let (store, etag, dir) = store_with_unreadable_item("scanned", &c, &raw).await;
+    parity::unreadable_items_are_scanned_and_overwritten(&store, &c, &raw, &etag).await;
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[tokio::test]
+async fn unreadable_items_are_counted_and_purged() {
+    let c = common::catalog("unreadable");
+    let raw = common::record("urn:air:raw", None);
+    let (store, _, dir) = store_with_unreadable_item("purged", &c, &raw).await;
+    parity::unreadable_items_are_counted_and_purged(&store, &c, &raw).await;
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Replace overwrites a record this release cannot read, without reading it, and deletes the
+/// entries the document lacks.
+#[tokio::test]
+async fn replace_overwrites_an_unreadable_record() {
+    use turul_ai_catalog_storage::{ImportMode, ModeKind, assemble, import};
+
+    let document = turul_ai_catalog::parse::parse(
+        br#"{"specVersion":"1.0","entries":[{"identifier":"urn:air:raw","type":"application/mcp-server-card+json","url":"https://example.com/card.json"}]}"#,
+    )
+    .unwrap();
+    let c = common::catalog("replace");
+    let raw = turul_ai_catalog_storage::EntryRecord::new(document.entries[0].clone()).unwrap();
+    let (store, _, dir) = store_with_unreadable_item("replace", &c, &raw).await;
+    store
+        .put_entry(
+            &c,
+            &common::record("urn:air:absent", None),
+            &common::curated(),
+            turul_ai_catalog_storage::Condition::Absent,
+        )
+        .await
+        .unwrap();
+    import(
+        &store,
+        &c,
+        &document,
+        &common::writer("operator"),
+        ImportMode::Replace { now: common::now() },
+    )
+    .await
+    .unwrap();
+    let listed = store.list_entries(&c).await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].provenance, common::curated());
+    assert_eq!(listed[0].provenance.kind(), ModeKind::Curated);
+    assert!(assemble(&store, &c, common::now()).await.is_ok());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Record bytes that do not parse fail a replace before anything is written; the operator purges.
+#[tokio::test]
+async fn replace_with_corrupt_record_bytes_writes_nothing() {
+    use sqlx::Connection;
+    use turul_ai_catalog_storage::{ImportError, ImportMode, StoreError, import};
+
+    let document = turul_ai_catalog::parse::parse(
+        br#"{"specVersion":"1.0","entries":[{"identifier":"urn:air:a","type":"application/mcp-server-card+json","url":"https://example.com/card.json"}]}"#,
+    )
+    .unwrap();
+    let c = common::catalog("corrupt");
+    let raw = common::record("urn:air:raw", None);
+    let (store, _, dir) = store_with_unreadable_item("corrupt", &c, &raw).await;
+    let mut conn =
+        sqlx::SqliteConnection::connect(&format!("sqlite://{}", dir.join("catalog.db").display()))
+            .await
+            .unwrap();
+    sqlx::query("UPDATE catalog_records SET record = ?1 WHERE catalog_id = ?2")
+        .bind(b"not json".as_slice())
+        .bind(c.as_str())
+        .execute(&mut conn)
+        .await
+        .unwrap();
+    conn.close().await.unwrap();
+    let before = store.count_catalog(&c).await.unwrap();
+    let result = import(
+        &store,
+        &c,
+        &document,
+        &common::writer("operator"),
+        ImportMode::Replace { now: common::now() },
+    )
+    .await;
+    assert!(
+        matches!(result, Err(ImportError::Store(StoreError::Corrupt { .. }))),
+        "{result:?}"
+    );
+    assert_eq!(store.count_catalog(&c).await.unwrap(), before);
+    // A purge reads nothing, so it still works.
+    assert_eq!(store.purge_catalog(&c).await.unwrap().removed, before);
     std::fs::remove_dir_all(&dir).unwrap();
 }

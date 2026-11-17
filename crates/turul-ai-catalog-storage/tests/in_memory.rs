@@ -47,6 +47,13 @@ parity_checks!(
     same_version_kind_puts_are_accepted,
     deleting_the_last_record_of_a_kind_frees_the_identifier,
     conditional_puts_keep_their_preconditions,
+    purge_removes_every_item_of_the_catalog,
+    purge_of_an_empty_catalog_removes_nothing,
+    count_catalog_is_what_purge_removes,
+    purge_leaves_other_catalogs_untouched,
+    overwrite_replaces_a_record_of_either_mode,
+    overwrite_of_a_missing_key_creates_as_any,
+    scan_entries_matches_list_entries,
 );
 
 /// Checks that need a store they can share, such as with a `Registrar`.
@@ -98,6 +105,11 @@ fn many_instances_refreshing_one_lease_all_succeed() {
     block_on(parity::many_instances_refreshing_one_lease_all_succeed(
         shared,
     ));
+}
+
+#[test]
+fn purge_removes_many_entries() {
+    block_on(parity::purge_removes_many_entries(&store(), 300));
 }
 
 #[test]

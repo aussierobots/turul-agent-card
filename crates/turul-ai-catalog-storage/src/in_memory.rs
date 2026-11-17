@@ -8,8 +8,8 @@ use crate::ids::{CatalogId, Etag, RecordKey};
 use crate::provenance::{ModeKind, Provenance};
 use crate::records::{EntryRecord, HostRecord};
 use crate::store::{
-    CatalogStore, Condition, StoreError, Stored, StoredEntry, corrupt, entry_write, key_error,
-    kind_conflict, stored_entry,
+    CatalogStore, Condition, ItemCounts, PurgeReport, ScannedEntry, StoreError, Stored,
+    StoredEntry, corrupt, entry_write, key_error, kind_conflict, scanned_entry, stored_entry,
 };
 
 /// One stored record: its bytes and version, and for an entry its provenance bytes and mode.
@@ -95,7 +95,7 @@ impl InMemoryCatalogStore {
     ) -> Result<(), StoreError> {
         let current = map.records.get(slot).map(|s| &s.etag);
         let allowed = match condition {
-            Condition::Any => true,
+            Condition::Any | Condition::Overwrite => true,
             Condition::Absent => current.is_none(),
             Condition::Matches(e) => current == Some(e),
         };
@@ -136,7 +136,8 @@ impl CatalogStore for InMemoryCatalogStore {
         let mut map = self.records.write().map_err(poisoned)?;
         Self::check_condition(&map, &slot, &condition)?;
         let created = !map.records.contains_key(&slot);
-        if let Some(stored) = map.records.get(&slot).and_then(|s| s.provenance.as_ref())
+        if condition != Condition::Overwrite
+            && let Some(stored) = map.records.get(&slot).and_then(|s| s.provenance.as_ref())
             && stored.1 != provenance.kind()
         {
             return Err(StoreError::ModeConflict { stored: stored.1 });
@@ -241,5 +242,53 @@ impl CatalogStore for InMemoryCatalogStore {
             record,
             etag: slot.etag,
         }))
+    }
+
+    async fn scan_entries(&self, catalog: &CatalogId) -> Result<Vec<ScannedEntry>, StoreError> {
+        let map = self.records.read().map_err(poisoned)?;
+        map.records
+            .iter()
+            .filter(|((c, k), _)| c == catalog && k.is_entry())
+            .map(|((_, k), slot)| {
+                scanned_entry(
+                    k,
+                    slot.bytes.clone(),
+                    slot.etag.clone(),
+                    slot.provenance.as_ref().map(|p| p.0.as_slice()),
+                )
+            })
+            .collect()
+    }
+
+    async fn count_catalog(&self, catalog: &CatalogId) -> Result<ItemCounts, StoreError> {
+        let map = self.records.read().map_err(poisoned)?;
+        let mut counts = ItemCounts::default();
+        for (c, k) in map.records.keys() {
+            if c == catalog {
+                counts.add_key(k.as_str());
+            }
+        }
+        counts.guards += map.guards.keys().filter(|(c, _)| c == catalog).count() as u64;
+        Ok(counts)
+    }
+
+    async fn purge_catalog(&self, catalog: &CatalogId) -> Result<PurgeReport, StoreError> {
+        let mut map = self.records.write().map_err(poisoned)?;
+        let mut removed = ItemCounts::default();
+        map.records.retain(|(c, k), _| {
+            let ours = c == catalog;
+            if ours {
+                removed.add_key(k.as_str());
+            }
+            !ours
+        });
+        map.guards.retain(|(c, _), _| {
+            let ours = c == catalog;
+            if ours {
+                removed.guards += 1;
+            }
+            !ours
+        });
+        Ok(PurgeReport { removed })
     }
 }

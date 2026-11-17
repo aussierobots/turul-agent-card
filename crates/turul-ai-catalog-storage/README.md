@@ -78,21 +78,24 @@ not check this: the interval and the lease length are configured in different pr
 [`import`] writes every entry as curated by the `WriterId` it is given, and refuses an entry whose
 key holds a lease or a curated record of another writer. **The curated writer id is permanent
 configuration**: changing it fails at the first entry the catalog already holds. If it is lost,
-delete the catalog id's items (entry records and `"g:"` guards) with store credentials and import
-again with the new id.
+run `turul-ai-catalog store import --replace` with the new id.
 
 Records stored by an earlier release have no provenance and are not read as curated. SQL `connect`
-fails on such a table; a DynamoDB assembly fails with `StoreError::CorruptProvenance`. To upgrade a
-store that is being served:
+fails on such a table; a DynamoDB assembly fails with `StoreError::CorruptProvenance`. No path reads
+the earlier format: a store being served is upgraded by replacing or deleting its data, with this
+release's CLI:
 
-1. `import` the curated catalog file with this release and its permanent writer id, under a **new**
-   `CatalogId` in the same table (SQL: a new database, SQLite: a new file).
-2. Deploy the function with `TURUL_AI_CATALOG_ID` set to the new id.
-3. Delete the old id's items with store credentials.
+- **Same catalog id** (DynamoDB; SQL `connect` refuses an earlier table), when the id holds no
+  live lease: stop the previous release's writers, run
+  `turul-ai-catalog store import --catalog-id LIVE --file CATALOG --writer WRITER --replace`, then
+  deploy the new function on the same `TURUL_AI_CATALOG_ID`.
+- **New catalog id**: `turul-ai-catalog store import` under a **new** `CatalogId` in the same table
+  (SQL: a new database, SQLite: a new file), deploy the function with `TURUL_AI_CATALOG_ID` set to
+  the new id, then `turul-ai-catalog store purge --catalog-id OLD --yes` with
+  `TURUL_AI_CATALOG_ID` set to the new id, which the purge refuses to remove.
 
-Until step 2 the previous function keeps serving the old id. **Never point the previous release at
-a new-format catalog id**: it writes entries without provenance, which this release then reads as
-corrupt, and it bypasses the mode exclusion.
+**Never point the previous release at a new-format catalog id**: it writes entries without
+provenance, which this release then reads as corrupt, and it bypasses the mode exclusion.
 
 ## Runtime registration
 

@@ -5,6 +5,25 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.0.23] - 2026-11-18
+
+### Added
+
+- `CatalogStore::purge_catalog` removes every item stored under a catalog id, and `count_catalog` counts what it would remove, by kind (`ItemCounts`: host, entries, guards, other). Both work on backend keys alone and read no record bytes, provenance or guard values, so they work on items an earlier release wrote. In-memory and SQL purge in one atomic step; DynamoDB deletes item by item (retrying conflicts at most 8 times) and is not atomic, so a failure part-way is finished by running the purge again.
+- `ImportMode::Replace { now }`: `import` makes the catalog id hold exactly the document. It overwrites the host and every document entry as curated by the writer (also an entry of another writer, an expired lease or a record an earlier release wrote), deletes entries the document lacks, and refuses with `ImportError::LiveLeases` before writing anything while a lease is live at `now`. Document entries the id already holds stay served while it runs; an identifier whose version kind changes is absent from when the old kind is deleted until the new one is written. An absent entry deleted by someone else during the replace is not an error. A document without a host leaves the stored host.
+- `turul-ai-catalog store import --file PATH --writer WRITER [--replace]` and `store purge [--yes]`. `purge` previews by default and removes only with `--yes`; it refuses the id equal to `TURUL_AI_CATALOG_ID`, so the id to purge must be given as `--catalog-id`. `import` follows no nested catalog, and exits 1 only for a document with an error diagnostic.
+- `CatalogStore::scan_entries` (an entry listing that reports unreadable provenance per entry instead of failing) and `Condition::Overwrite` (a put that replaces any record under its key without reading it), the two operations `Replace` needs.
+
+### Changed
+
+- `import` takes a fifth argument, `ImportMode`; pass `ImportMode::Merge` for the previous behaviour.
+- `CatalogStore` gains `scan_entries`, `count_catalog` and `purge_catalog`, and `Condition` gains `Overwrite`: a `CatalogStore` implemented outside this crate must add them.
+- Upgrading a store from 0.0.20 or earlier no longer needs a hand-written delete: replace in place with `store import --replace` against the same catalog id once no live lease exists, or import under a new id and `store purge` the old one.
+
+### Verification
+
+- The parity suite runs purge, overwrite and scan against in-memory, SQLite, PostgreSQL and DynamoDB Local, including items with unreadable provenance and a DynamoDB table holding the earlier release's items.
+
 ## [0.0.22] - 2026-11-18
 
 ### Changed

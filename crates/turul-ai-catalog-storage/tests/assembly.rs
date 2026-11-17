@@ -81,6 +81,24 @@ impl CatalogStore for Listed {
     fn backend_name(&self) -> &'static str {
         "listed"
     }
+    async fn scan_entries(
+        &self,
+        _: &CatalogId,
+    ) -> Result<Vec<turul_ai_catalog_storage::ScannedEntry>, StoreError> {
+        unreachable!()
+    }
+    async fn count_catalog(
+        &self,
+        _: &CatalogId,
+    ) -> Result<turul_ai_catalog_storage::ItemCounts, StoreError> {
+        unreachable!()
+    }
+    async fn purge_catalog(
+        &self,
+        _: &CatalogId,
+    ) -> Result<turul_ai_catalog_storage::PurgeReport, StoreError> {
+        unreachable!()
+    }
     async fn put_entry(
         &self,
         _: &CatalogId,

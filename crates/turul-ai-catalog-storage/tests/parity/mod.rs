@@ -16,9 +16,9 @@ use turul_ai_catalog::model::{ArtifactSource, Members};
 use turul_ai_catalog::parse::parse_entry;
 use turul_ai_catalog::timestamp::Timestamp;
 use turul_ai_catalog_storage::{
-    CatalogId, CatalogStore, Condition, EntryRecord, Etag, HostRecord, ModeKind, ModeRequest,
-    Provenance, ProvenanceError, Registrar, RegistrationError, RegistrationPolicy, StoreError,
-    Stored, StoredEntry, WriterGrant, assemble,
+    CatalogId, CatalogStore, Condition, EntryRecord, Etag, HostRecord, ItemCounts, ModeKind,
+    ModeRequest, Provenance, ProvenanceError, Registrar, RegistrationError, RegistrationPolicy,
+    StoreError, Stored, StoredEntry, WriterGrant, assemble,
 };
 
 use crate::common::*;
@@ -1177,6 +1177,24 @@ impl CatalogStore for CountingStore {
     fn backend_name(&self) -> &'static str {
         self.inner.backend_name()
     }
+    async fn scan_entries(
+        &self,
+        c: &CatalogId,
+    ) -> Result<Vec<turul_ai_catalog_storage::ScannedEntry>, StoreError> {
+        self.inner.scan_entries(c).await
+    }
+    async fn count_catalog(
+        &self,
+        c: &CatalogId,
+    ) -> Result<turul_ai_catalog_storage::ItemCounts, StoreError> {
+        self.inner.count_catalog(c).await
+    }
+    async fn purge_catalog(
+        &self,
+        c: &CatalogId,
+    ) -> Result<turul_ai_catalog_storage::PurgeReport, StoreError> {
+        self.inner.purge_catalog(c).await
+    }
     async fn put_entry(
         &self,
         catalog: &CatalogId,
@@ -1289,4 +1307,343 @@ pub async fn many_instances_refreshing_one_lease_all_succeed(store: Arc<dyn Cata
         );
     }
     assert_eq!(counting.puts.load(Ordering::SeqCst), seeded + 4);
+}
+
+fn counts(host: u64, entries: u64, guards: u64, other: u64) -> ItemCounts {
+    ItemCounts {
+        host,
+        entries,
+        guards,
+        other,
+    }
+}
+
+/// The bytes of the empty catalog, which a catalog with no items assembles to.
+async fn empty_catalog_bytes(store: &dyn CatalogStore, check: &str) -> Vec<u8> {
+    assemble(store, &id(&format!("{check}.never-written")), now())
+        .await
+        .unwrap()
+        .bytes
+}
+
+pub async fn purge_removes_every_item_of_the_catalog(store: &dyn CatalogStore) {
+    let c = id("purge-removes-every-item-of-the-catalog");
+    store
+        .put_host(&c, &host(), Condition::Absent)
+        .await
+        .unwrap();
+    let seeded = [
+        ("urn:air:a", None, curated()),
+        ("urn:air:b", Some("1"), curated()),
+        ("urn:air:b", Some("2"), curated_by("other")),
+        ("urn:air:c", None, lease("svc", "2030-01-01T00:00:00Z")),
+        ("urn:air:d", Some("1"), lease("svc", "2020-01-01T00:00:00Z")),
+    ];
+    for (identifier, version, provenance) in &seeded {
+        store
+            .put_entry(
+                &c,
+                &record(identifier, *version),
+                provenance,
+                Condition::Absent,
+            )
+            .await
+            .unwrap();
+    }
+    assert_eq!(store.count_catalog(&c).await.unwrap(), counts(1, 5, 4, 0));
+    let report = store.purge_catalog(&c).await.unwrap();
+    assert_eq!(report.removed, counts(1, 5, 4, 0));
+    assert_eq!(report.removed.total(), 10);
+    assert_eq!(store.count_catalog(&c).await.unwrap().total(), 0);
+    assert!(store.get_host(&c).await.unwrap().is_none());
+    assert!(store.list_entries(&c).await.unwrap().is_empty());
+    assert_eq!(
+        assemble(store, &c, now()).await.unwrap().bytes,
+        empty_catalog_bytes(store, "purge-removes-every-item-of-the-catalog").await
+    );
+    // The guards went too: each identifier can be created as the other version kind.
+    store
+        .put_entry(
+            &c,
+            &record("urn:air:a", Some("1")),
+            &curated(),
+            Condition::Absent,
+        )
+        .await
+        .unwrap();
+    store
+        .put_entry(
+            &c,
+            &record("urn:air:b", None),
+            &curated(),
+            Condition::Absent,
+        )
+        .await
+        .unwrap();
+}
+
+/// A purge of `count` entries, each its own identifier, removes them all and their guards.
+pub async fn purge_removes_many_entries(store: &dyn CatalogStore, count: u64) {
+    let c = id(&format!("purge-removes-{count}-entries"));
+    for n in 0..count {
+        store
+            .put_entry(
+                &c,
+                &record(&format!("urn:air:n{n}"), None),
+                &curated(),
+                Condition::Absent,
+            )
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        store.purge_catalog(&c).await.unwrap().removed,
+        counts(0, count, count, 0)
+    );
+    assert_eq!(store.count_catalog(&c).await.unwrap().total(), 0);
+}
+
+pub async fn purge_of_an_empty_catalog_removes_nothing(store: &dyn CatalogStore) {
+    let c = id("purge-of-an-empty-catalog-removes-nothing");
+    assert_eq!(store.count_catalog(&c).await.unwrap(), counts(0, 0, 0, 0));
+    let report = store.purge_catalog(&c).await.unwrap();
+    assert_eq!(report.removed, counts(0, 0, 0, 0));
+    assert_eq!(report.removed.total(), 0);
+}
+
+pub async fn count_catalog_is_what_purge_removes(store: &dyn CatalogStore) {
+    let c = id("count-catalog-is-what-purge-removes");
+    store
+        .put_host(&c, &host(), Condition::Absent)
+        .await
+        .unwrap();
+    for (identifier, version) in [("urn:air:a", None), ("urn:air:b", Some("1"))] {
+        store
+            .put_entry(
+                &c,
+                &record(identifier, version),
+                &curated(),
+                Condition::Absent,
+            )
+            .await
+            .unwrap();
+    }
+    let counted = store.count_catalog(&c).await.unwrap();
+    assert_eq!(counted, counts(1, 2, 2, 0));
+    // Counting removes nothing.
+    assert_eq!(store.count_catalog(&c).await.unwrap(), counted);
+    assert_eq!(store.list_entries(&c).await.unwrap().len(), 2);
+    assert_eq!(store.purge_catalog(&c).await.unwrap().removed, counted);
+}
+
+pub async fn purge_leaves_other_catalogs_untouched(store: &dyn CatalogStore) {
+    let (a, b) = (
+        id("purge-leaves-other-catalogs-untouched.a"),
+        id("purge-leaves-other-catalogs-untouched.b"),
+    );
+    for c in [&a, &b] {
+        store.put_host(c, &host(), Condition::Absent).await.unwrap();
+        store
+            .put_entry(c, &record("urn:air:a", None), &curated(), Condition::Absent)
+            .await
+            .unwrap();
+        store
+            .put_entry(
+                c,
+                &record("urn:air:b", Some("1")),
+                &lease("svc", "2030-01-01T00:00:00Z"),
+                Condition::Absent,
+            )
+            .await
+            .unwrap();
+    }
+    let before_entries = store.list_entries(&b).await.unwrap();
+    let before_host = store.get_host(&b).await.unwrap();
+    let before_bytes = assemble(store, &b, now()).await.unwrap().bytes;
+    let before_counts = store.count_catalog(&b).await.unwrap();
+    store.purge_catalog(&a).await.unwrap();
+    assert_eq!(store.count_catalog(&a).await.unwrap().total(), 0);
+    let mut after_entries = store.list_entries(&b).await.unwrap();
+    let mut before_entries = before_entries;
+    before_entries.sort_by_key(|s| s.record.key());
+    after_entries.sort_by_key(|s| s.record.key());
+    assert_eq!(after_entries, before_entries);
+    assert_eq!(store.get_host(&b).await.unwrap(), before_host);
+    assert_eq!(
+        assemble(store, &b, now()).await.unwrap().bytes,
+        before_bytes
+    );
+    assert_eq!(store.count_catalog(&b).await.unwrap(), before_counts);
+}
+
+pub async fn overwrite_replaces_a_record_of_either_mode(store: &dyn CatalogStore) {
+    let c = id("overwrite-replaces-a-record-of-either-mode");
+    let r = record("urn:air:a", None);
+    store
+        .put_entry(
+            &c,
+            &r,
+            &lease("svc", "2030-01-01T00:00:00Z"),
+            Condition::Absent,
+        )
+        .await
+        .unwrap();
+    let mut changed = entry("urn:air:a", None);
+    changed.description = Some("changed".to_string());
+    let changed = EntryRecord::new(changed).unwrap();
+    for provenance in [
+        curated_by("someone"),
+        lease("svc", "2031-01-01T00:00:00Z"),
+        curated(),
+    ] {
+        let etag = store
+            .put_entry(&c, &changed, &provenance, Condition::Overwrite)
+            .await
+            .unwrap();
+        assert_eq!(etag, Etag::of_entry(&changed, &provenance).unwrap());
+        let got = store.get_entry(&c, &r.key()).await.unwrap().unwrap();
+        assert_eq!(
+            (got.record.bytes(), got.provenance, got.etag),
+            (changed.bytes(), provenance, etag)
+        );
+    }
+    // A replace adds no entry and no guard.
+    assert_eq!(store.count_catalog(&c).await.unwrap(), counts(0, 1, 1, 0));
+    // So deleting the record frees the identifier for the other version kind.
+    store.delete_entry(&c, &r.key(), None).await.unwrap();
+    assert_eq!(store.count_catalog(&c).await.unwrap().total(), 0);
+    store
+        .put_entry(
+            &c,
+            &record("urn:air:a", Some("1")),
+            &curated(),
+            Condition::Absent,
+        )
+        .await
+        .unwrap();
+}
+
+pub async fn overwrite_of_a_missing_key_creates_as_any(store: &dyn CatalogStore) {
+    let c = id("overwrite-of-a-missing-key-creates-as-any");
+    let r = record("urn:air:k", None);
+    let etag = store
+        .put_entry(&c, &r, &curated(), Condition::Overwrite)
+        .await
+        .unwrap();
+    let got = store.get_entry(&c, &r.key()).await.unwrap().unwrap();
+    assert_eq!((got.provenance, got.etag), (curated(), etag));
+    assert_eq!(store.count_catalog(&c).await.unwrap(), counts(0, 1, 1, 0));
+    assert_eq!(
+        store
+            .put_entry(
+                &c,
+                &record("urn:air:k", Some("1")),
+                &curated(),
+                Condition::Overwrite
+            )
+            .await,
+        kind_conflict("urn:air:k")
+    );
+    assert_eq!(store.count_catalog(&c).await.unwrap(), counts(0, 1, 1, 0));
+}
+
+pub async fn scan_entries_matches_list_entries(store: &dyn CatalogStore) {
+    let c = id("scan-entries-matches-list-entries");
+    assert!(store.scan_entries(&c).await.unwrap().is_empty());
+    for (identifier, version, provenance) in [
+        ("urn:air:a", None, curated()),
+        ("urn:air:b", Some("1"), lease("svc", "2030-01-01T00:00:00Z")),
+        ("urn:air:b", Some("2"), curated_by("other")),
+    ] {
+        store
+            .put_entry(
+                &c,
+                &record(identifier, version),
+                &provenance,
+                Condition::Absent,
+            )
+            .await
+            .unwrap();
+    }
+    let mut listed = store.list_entries(&c).await.unwrap();
+    listed.sort_by_key(|s| s.record.key());
+    let mut scanned = store.scan_entries(&c).await.unwrap();
+    scanned.sort_by_key(|s| s.key.clone());
+    assert_eq!(scanned.len(), listed.len());
+    for (scan, list) in scanned.iter().zip(&listed) {
+        assert_eq!(scan.key, list.record.key());
+        assert_eq!(scan.etag, list.etag);
+        assert_eq!(scan.provenance.as_ref(), Ok(&list.provenance));
+    }
+}
+
+/// Run by each backend that can hold an item this release cannot read, after it wrote `raw` as an
+/// entry item under `c` with the stored version `etag` and provenance that does not read: a scan
+/// reports it as a value, an overwrite replaces it without reading it, and strict reads fail on it
+/// until then.
+pub async fn unreadable_items_are_scanned_and_overwritten(
+    store: &dyn CatalogStore,
+    c: &CatalogId,
+    raw: &EntryRecord,
+    etag: &Etag,
+) {
+    let readable = record("urn:air:readable", None);
+    store
+        .put_entry(c, &readable, &curated(), Condition::Absent)
+        .await
+        .unwrap();
+    let scanned = store.scan_entries(c).await.unwrap();
+    assert_eq!(scanned.len(), 2);
+    for scan in &scanned {
+        if scan.key == raw.key() {
+            assert_eq!(&scan.etag, etag);
+            assert!(scan.provenance.is_err(), "{:?}", scan.provenance);
+        } else {
+            assert_eq!(scan.provenance, Ok(curated()));
+        }
+    }
+    assert!(matches!(
+        store.list_entries(c).await,
+        Err(StoreError::CorruptProvenance { .. })
+    ));
+    let new = store
+        .put_entry(c, raw, &curated_by("fresh"), Condition::Overwrite)
+        .await
+        .unwrap();
+    assert_eq!(new, Etag::of_entry(raw, &curated_by("fresh")).unwrap());
+    let listed = store.list_entries(c).await.unwrap();
+    assert_eq!(listed.len(), 2);
+    assert!(
+        store
+            .scan_entries(c)
+            .await
+            .unwrap()
+            .iter()
+            .all(|s| s.provenance.is_ok())
+    );
+}
+
+/// Run by each backend that can hold an item this release cannot read, after it wrote `raw` under
+/// `c` as an entry item whose provenance does not read: a count and a purge need only keys, so
+/// they count and remove it with the readable entry beside it.
+pub async fn unreadable_items_are_counted_and_purged(
+    store: &dyn CatalogStore,
+    c: &CatalogId,
+    raw: &EntryRecord,
+) {
+    store
+        .put_entry(
+            c,
+            &record("urn:air:readable", None),
+            &curated(),
+            Condition::Absent,
+        )
+        .await
+        .unwrap();
+    let counted = store.count_catalog(c).await.unwrap();
+    assert_eq!(counted.entries, 2);
+    assert!(store.get_entry(c, &raw.key()).await.is_err());
+    assert_eq!(store.purge_catalog(c).await.unwrap().removed, counted);
+    assert_eq!(store.count_catalog(c).await.unwrap().total(), 0);
+    assert!(store.scan_entries(c).await.unwrap().is_empty());
 }

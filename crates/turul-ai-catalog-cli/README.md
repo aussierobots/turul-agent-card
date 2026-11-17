@@ -35,9 +35,11 @@ turul-ai-catalog remove --file catalog.json --identifier ID [--version V]
 ```sh
 turul-ai-catalog store list   BACKEND --catalog-id ID
 turul-ai-catalog store remove BACKEND --catalog-id ID --identifier ID [--version V]
+turul-ai-catalog store import BACKEND --catalog-id ID --file PATH --writer WRITER [--replace]
+turul-ai-catalog store purge  BACKEND --catalog-id ID [--yes]
 ```
 
-`BACKEND` is one of `--sqlite PATH`, `--postgres URL` (feature `postgres`) or `--table NAME` (DynamoDB, feature `dynamodb`). Each reads an environment variable when its flag is absent: `TURUL_AI_CATALOG_SQLITE`, `TURUL_AI_CATALOG_POSTGRES_URL` and `TURUL_AI_CATALOG_TABLE`, and `--catalog-id` reads `TURUL_AI_CATALOG_ID`, as the Lambda does. DynamoDB credentials come from the AWS default chain. `list` prints one line per entry: identifier, version, mode, writer and whether it is live, expired or never expires. `remove` deletes the entry with exactly that identifier and version (no `--version` names the unversioned entry) and refuses when the entry changed since it was read. Both exit 0 on success and 2 on any failure, including `remove` matching no entry.
+`BACKEND` is one of `--sqlite PATH`, `--postgres URL` (feature `postgres`) or `--table NAME` (DynamoDB, feature `dynamodb`). Each reads an environment variable when its flag is absent: `TURUL_AI_CATALOG_SQLITE`, `TURUL_AI_CATALOG_POSTGRES_URL` and `TURUL_AI_CATALOG_TABLE`, and `--catalog-id` reads `TURUL_AI_CATALOG_ID`, as the Lambda does. DynamoDB credentials come from the AWS default chain. `list` prints one line per entry: identifier, version, mode, writer and whether it is live, expired or never expires. `remove` deletes the entry with exactly that identifier and version (no `--version` names the unversioned entry) and refuses when the entry changed since it was read. `import` stores the entries of a catalog file as curated by the permanent writer id `--writer`, following no nested catalog; with `--replace` the catalog id then holds exactly the file (a file without a host keeps the stored host), and it refuses, writing nothing, while the id holds a live lease. `purge` only counts the id's items by kind unless given `--yes`, and refuses the id equal to `TURUL_AI_CATALOG_ID`, so the id to purge must be given as `--catalog-id`. Each exits 0 on success, 1 when `import` refuses a file with an error diagnostic, and 2 on any other failure, including `remove` matching no entry.
 
 ## Exit codes
 

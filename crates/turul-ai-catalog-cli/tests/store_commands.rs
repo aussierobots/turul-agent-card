@@ -252,3 +252,229 @@ fn an_invalid_catalog_id_exits_2() {
     assert_eq!(code(&out), 2);
     assert!(!stderr(&out).is_empty());
 }
+
+const MAIN_COUNTS: &str = "host 0\nentries 2\nguards 2\nother 0\n";
+
+fn purge_args<'a>(db: &'a Db, id: &'a str) -> Vec<&'a str> {
+    vec!["store", "purge", "--sqlite", db.path(), "--catalog-id", id]
+}
+
+fn list_main(db: &Db) -> String {
+    stdout(&run(
+        &[
+            "store",
+            "list",
+            "--sqlite",
+            db.path(),
+            "--catalog-id",
+            "main",
+        ],
+        &[],
+    ))
+}
+
+#[test]
+fn purge_without_yes_previews_and_removes_nothing() {
+    let db = Db::seeded("purge-preview");
+    let out = run(&purge_args(&db, "main"), &[]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    assert_eq!(
+        stdout(&out),
+        format!("{MAIN_COUNTS}nothing removed; run again with --yes to remove\n")
+    );
+    assert_eq!(list_main(&db).lines().count(), 2);
+}
+
+#[test]
+fn purge_with_yes_removes_every_item() {
+    let db = Db::seeded("purge-yes");
+    let out = run(&[&purge_args(&db, "main")[..], &["--yes"]].concat(), &[]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    assert_eq!(stdout(&out), format!("{MAIN_COUNTS}removed 4 items\n"));
+    assert_eq!(list_main(&db), "");
+}
+
+#[test]
+fn purge_of_an_empty_catalog_reports_zeros_and_exits_0() {
+    let db = Db::seeded("purge-empty");
+    let out = run(&[&purge_args(&db, "none")[..], &["--yes"]].concat(), &[]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    assert_eq!(
+        stdout(&out),
+        "host 0\nentries 0\nguards 0\nother 0\nremoved 0 items\n"
+    );
+}
+
+#[test]
+fn purge_refuses_the_live_catalog_id() {
+    let db = Db::seeded("purge-live");
+    // The flag equals the variable.
+    let out = run(
+        &[&purge_args(&db, "main")[..], &["--yes"]].concat(),
+        &[("TURUL_AI_CATALOG_ID", "main")],
+    );
+    assert_eq!(code(&out), 2);
+    assert_eq!(stdout(&out), "");
+    assert!(
+        stderr(&out).contains("TURUL_AI_CATALOG_ID"),
+        "{}",
+        stderr(&out)
+    );
+    // The flag is absent, so the id comes from the variable.
+    let out = run(
+        &["store", "purge", "--sqlite", db.path(), "--yes"],
+        &[("TURUL_AI_CATALOG_ID", "main")],
+    );
+    assert_eq!(code(&out), 2);
+    assert!(
+        stderr(&out).contains("TURUL_AI_CATALOG_ID"),
+        "{}",
+        stderr(&out)
+    );
+    assert_eq!(list_main(&db).lines().count(), 2);
+}
+
+#[test]
+fn purge_of_another_id_with_the_live_id_set_succeeds() {
+    let db = Db::seeded("purge-other");
+    let out = run(
+        &[&purge_args(&db, "main")[..], &["--yes"]].concat(),
+        &[("TURUL_AI_CATALOG_ID", "live")],
+    );
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    assert_eq!(list_main(&db), "");
+}
+
+fn catalog_file(test: &str, body: &str) -> PathBuf {
+    let path = std::env::temp_dir().join(format!("turul-store-{test}-{}.json", std::process::id()));
+    std::fs::write(&path, body).unwrap();
+    path
+}
+
+const ENTRY_A: &str = r#"{"identifier":"a","type":"application/mcp-server-card+json","url":"https://example.com/a.json"}"#;
+
+fn catalog_of(entries: &[&str]) -> String {
+    format!(
+        r#"{{"specVersion":"1.0","entries":[{}]}}"#,
+        entries.join(",")
+    )
+}
+
+fn import_args<'a>(db: &'a Db, file: &'a str) -> Vec<&'a str> {
+    vec![
+        "store",
+        "import",
+        "--sqlite",
+        db.path(),
+        "--catalog-id",
+        "fresh",
+        "--file",
+        file,
+        "--writer",
+        "op",
+    ]
+}
+
+fn list_of(db: &Db, id: &str) -> String {
+    stdout(&run(
+        &["store", "list", "--sqlite", db.path(), "--catalog-id", id],
+        &[],
+    ))
+}
+
+#[test]
+fn import_writes_curated_entries_and_exits_0() {
+    let db = Db::seeded("import");
+    let file = catalog_file("import", &catalog_of(&[ENTRY_A]));
+    let out = run(&import_args(&db, file.to_str().unwrap()), &[]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    assert_eq!(stdout(&out), "imported 1 entries\n");
+    assert_eq!(list_of(&db, "fresh"), "a  -  curated  op  no expiry\n");
+    std::fs::remove_file(file).unwrap();
+}
+
+#[test]
+fn import_replace_removes_absent_entries() {
+    let db = Db::seeded("import-replace");
+    let file = catalog_file("import-replace", &catalog_of(&[ENTRY_A]));
+    let mut args = import_args(&db, file.to_str().unwrap());
+    args[5] = "main";
+    // Without --replace the other writer's entry is refused.
+    let out = run(&args, &[]);
+    assert_eq!(code(&out), 2);
+    args.push("--replace");
+    let out = run(&args, &[]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    assert_eq!(stdout(&out), "imported 1 entries\n");
+    assert_eq!(list_main(&db), "a  -  curated  op  no expiry\n");
+    std::fs::remove_file(file).unwrap();
+}
+
+#[test]
+fn import_of_a_document_with_an_error_exits_1() {
+    let db = Db::seeded("import-invalid");
+    let file = catalog_file("import-invalid", &catalog_of(&[ENTRY_A, ENTRY_A]));
+    let out = run(&import_args(&db, file.to_str().unwrap()), &[]);
+    assert_eq!(code(&out), 1, "{}", stderr(&out));
+    assert!(stderr(&out).contains("/entries/1"), "{}", stderr(&out));
+    assert_eq!(list_of(&db, "fresh"), "");
+    std::fs::remove_file(file).unwrap();
+}
+
+#[test]
+fn import_replace_with_a_live_lease_exits_2() {
+    let db = Db::seeded("import-live");
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let store = SqliteCatalogStore::connect(db.path()).await.unwrap();
+            let entry = CatalogEntry::new(
+                EntryIdentifier::new("live"),
+                ArtifactType::MCP_SERVER_CARD,
+                ArtifactSource::Url("https://example.com/card.json".to_string()),
+            );
+            store
+                .put_entry(
+                    &CatalogId::new("main").unwrap(),
+                    &EntryRecord::new(entry).unwrap(),
+                    &Provenance::Lease {
+                        writer: WriterId::new("svc").unwrap(),
+                        expires_at: Timestamp::parse("2999-01-01T00:00:00Z").unwrap(),
+                    },
+                    Condition::Absent,
+                )
+                .await
+                .unwrap();
+        });
+    let file = catalog_file("import-live", &catalog_of(&[ENTRY_A]));
+    let mut args = import_args(&db, file.to_str().unwrap());
+    args[5] = "main";
+    args.push("--replace");
+    let out = run(&args, &[]);
+    assert_eq!(code(&out), 2);
+    let err = stderr(&out);
+    assert!(
+        err.contains("live") && err.contains("svc") && err.contains("2999-01-01T00:00:00Z"),
+        "{err}"
+    );
+    assert_eq!(list_main(&db).lines().count(), 3);
+    std::fs::remove_file(file).unwrap();
+}
+
+#[test]
+fn import_follows_no_nested_catalog() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let url = format!("http://{}/child.json", listener.local_addr().unwrap());
+    let nested =
+        format!(r#"{{"identifier":"child","type":"application/ai-catalog+json","url":"{url}"}}"#);
+    let db = Db::seeded("import-nested");
+    let file = catalog_file("import-nested", &catalog_of(&[&nested]));
+    let out = run(&import_args(&db, file.to_str().unwrap()), &[]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    assert_eq!(list_of(&db, "fresh"), "child  -  curated  op  no expiry\n");
+    assert!(listener.accept().is_err(), "no request must be sent");
+    std::fs::remove_file(file).unwrap();
+}
