@@ -58,7 +58,7 @@ keeps its own schema, and the catalog adds discovery, publisher and trust inform
 ### Command line
 
 ```sh
-cargo install --path crates/turul-ai-catalog-cli
+cargo install turul-ai-catalog-cli
 
 turul-ai-catalog init --file ai-catalog.json \
   --host-display-name "Example Corp" --host-identifier did:web:example.com
