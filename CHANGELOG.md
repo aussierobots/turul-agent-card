@@ -10,11 +10,16 @@ All notable changes to this project are documented here. The format follows
 ### Added
 
 - `turul_ai_catalog_lambda::ServedCatalog::from_document(&AiCatalog)` builds the served catalog from a caller-supplied document through the in-memory store (`import`, then `assemble`): the same gate as cold start, with no file read and no default catalog. Errors are `ColdStartError::Import` and `ColdStartError::Assemble`. The local server uses it. See ADR-010.
+- `turul_ai_catalog::identity::UrnAir`: the `urn:air` identifier parser now lives in the core crate, so building and validating a catalog no longer needs the trust crate. See ADR-004.
 
 ### Fixed
 
 - `turul_ai_catalog_storage::import` validates the whole document first and refuses one with errors (`ImportError::Invalid`) before writing anything. Two entries with the same identifier and version used to collapse into one record, and the assembled catalog passed with an entry missing. See ADR-016.
 - ADR-010 records that the Lambda crate is published. ADR-001, ADR-003 and ADR-013 are Accepted.
+
+### Removed
+
+- `turul_ai_catalog_trust::UrnAir` and `turul_ai_catalog_trust::identity::UrnAir`; import `turul_ai_catalog::identity::UrnAir` instead.
 
 ### Compatibility
 

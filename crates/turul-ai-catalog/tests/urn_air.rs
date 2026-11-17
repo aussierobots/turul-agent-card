@@ -1,6 +1,6 @@
 //! `urn:air` identifier components.
 
-use turul_ai_catalog_trust::UrnAir;
+use turul_ai_catalog::identity::UrnAir;
 
 #[test]
 fn components_split_into_publisher_namespace_and_name() {

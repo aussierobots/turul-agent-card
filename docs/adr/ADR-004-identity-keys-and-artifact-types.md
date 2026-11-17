@@ -136,3 +136,4 @@ The requirements left out are each owned elsewhere. catalog-entry-3, -4 and -5 a
 |---|---|
 | 2026-11-17 | Created for S3: `EntryIdentifier`, `EntryKey` (via `CatalogEntry::key`), `ArtifactType` with 10 known-type consts, `HostIdentifier`, `MEDIA_TYPE`, `WELL_KNOWN_PATH`; entry, host and subject identity fields retyped. AMB-98 and AMB-99 added. |
 | 2026-11-17 | Accepted: `entry_key.rs` and `artifact_types.rs` green; every §5 `String` identity field deleted. Released in 0.0.4. |
+| 2026-11-17 | M24: `UrnAir` (`parse`, `publisher`, `namespace`, `name`) joins `identity` as the one `urn:air` grammar parser. Its grammar is unchanged from ADR-012. It is parsing only: `validate` still treats `identifier` as open text (#catalog-entry) and does not require `urn:air`. Pinned by `tests/urn_air.rs`. |

@@ -21,7 +21,7 @@ pub use header::{
     DID_WEB_V1_FORBIDDEN_HEADERS, ES256, HeaderError, Kid, TYP_CATALOG, TYP_TRUST_MANIFEST,
     inspect, kid_matches_signer, policy,
 };
-pub use identity::{DidWebRoot, UrnAir};
+pub use identity::DidWebRoot;
 pub use object::SignedObject;
 pub use payload::{PayloadError, catalog_payload, manifest_payload};
 pub use report::{

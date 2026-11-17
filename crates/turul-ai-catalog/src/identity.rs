@@ -114,3 +114,58 @@ impl EntryKey {
         self.version.as_deref()
     }
 }
+
+const URN_AIR_PREFIX: &str = "urn:air:";
+
+/// A `urn:air` identifier split into publisher, namespace and name. Parsing is grammar only:
+/// [`validate`](crate::validate::validate) does not require entry identifiers to be `urn:air`, and
+/// the publisher is not checked against any domain rule here.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UrnAir {
+    publisher: String,
+    namespace: String,
+    name: String,
+}
+
+impl UrnAir {
+    /// Returns the identifier when `s` is `urn:air:` followed by at least a publisher, a
+    /// namespace and a name, all non-empty, else `None`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use turul_ai_catalog::identity::UrnAir;
+    ///
+    /// let urn = UrnAir::parse("urn:air:example.com:a2a:research").ok_or("not an urn:air")?;
+    /// assert_eq!(urn.publisher(), "example.com");
+    /// assert_eq!(urn.namespace(), "a2a");
+    /// assert_eq!(urn.name(), "research");
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn parse(s: &str) -> Option<Self> {
+        let parts: Vec<&str> = s.strip_prefix(URN_AIR_PREFIX)?.split(':').collect();
+        if parts.len() < 3 || parts.iter().any(|p| p.is_empty()) {
+            return None;
+        }
+        Some(Self {
+            publisher: parts[0].to_string(),
+            namespace: parts[1..parts.len() - 1].join(":"),
+            name: parts[parts.len() - 1].to_string(),
+        })
+    }
+
+    /// Returns the publisher component.
+    pub fn publisher(&self) -> &str {
+        &self.publisher
+    }
+
+    /// Returns every component between publisher and name, `:` kept.
+    pub fn namespace(&self) -> &str {
+        &self.namespace
+    }
+
+    /// Returns the name component.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}

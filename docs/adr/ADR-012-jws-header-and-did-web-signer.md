@@ -66,7 +66,7 @@ The producer MUSTs (#the-did-web-signer-profile, #jws-algorithm-and-key-requirem
 | Key or artifact | Owner | Entrypoint |
 |---|---|---|
 | Root `did:web` identity (signer, operator, publisher DID) | `identity::DidWebRoot::parse` | itself; ADR-015 `verify_signature`, `publisher_authorized`, `TrustPolicy::operators` |
-| `urn:air` components | `identity::UrnAir::parse` | itself; ADR-015 `publisher_authorized` |
+| `urn:air` components | `turul_ai_catalog::identity::UrnAir::parse` (moved to the core crate, M24; owned by ADR-004) | ADR-015 `publisher_authorized` |
 | Header policy | `header::policy(SignedObject)` | `header::inspect`; ADR-015 `verify_signature` (`verify_detached`) |
 | Header check (structure, `alg`, `typ`, `b64`, `crit`, forbidden members) | `turul_jwt_validator::detached::inspect_detached` through `header::policy` | `header::inspect` |
 | Checked `kid` | `header::Kid`, built only by `header::inspect` | ADR-014 `select_key` |
@@ -146,3 +146,4 @@ Agreements: `typ`, `alg` ES256 only, `none`, the four forbidden members and the 
 | 2026-11-17 | S14 landed: `identity`, `header` and `object` modules, the three test files and the two `sdk_trust_interop` rows. `SignedObject` is defined in `object` (ADR-015 reuses it). `TYP_*` moved from `sign` to `header`, and `sign` now takes its `kid` fragment check from the format crate's public `uri::is_fragment` (one grammar). Added tests `inspect_returns_a_checked_kid` and `unparsable_signer_is_kid_mismatch`. |
 | 2026-11-17 | `Kid::parse(&str, &DidWebRoot) -> Option<Kid>` added (T3): the one constructor of a `Kid`, applying `kid_matches_signer`; `header::inspect` builds its `Kid` through it. |
 | 2026-11-17 | The ADR-013 signer now builds its `kid` through `Kid::parse` and takes its signer as `DidWebRoot`, so the owner-table row "`kid` form … ADR-013 signer" holds: `sign`'s second `kid` rule (non-empty signer without `#`, then `is_fragment`) is deleted. |
+| 2026-11-17 | M24: `UrnAir` moved to `turul_ai_catalog::identity` (ADR-004) so consumers that only build and validate catalogs can parse `urn:air` without the trust crate. The trust crate imports it from core and does not re-export it. The grammar and its tests (`urn_air.rs`, now in the core crate) are unchanged. |

@@ -7,14 +7,14 @@
 use std::collections::HashMap;
 use std::time::SystemTime;
 
-use turul_ai_catalog::identity::EntryIdentifier;
+use turul_ai_catalog::identity::{EntryIdentifier, UrnAir};
 use turul_ai_catalog::model::{AiCatalog, CatalogEntry, TrustManifest};
 use turul_ai_catalog_client::{Child, ResolvedCatalog};
 
 use crate::accept::{AcceptedSignature, Reason, TrustPolicy, accept, precheck};
 use crate::did_web::{DidDocument, ResolveError, resolve};
 use crate::digest::{IntegrityError, verify_artifact};
-use crate::identity::{DidWebRoot, UrnAir};
+use crate::identity::DidWebRoot;
 use crate::object::SignedObject;
 
 /// The DID document, or why there is none, for each signer.
