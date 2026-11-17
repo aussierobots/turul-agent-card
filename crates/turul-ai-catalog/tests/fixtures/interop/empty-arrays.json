@@ -1,0 +1,2 @@
+{"specVersion":"1.0","entries":[{"identifier":"urn:air:acme.com:agent:a","type":"application/json","url":"https://example.com/a.json","tags":[],"trustManifests":[]},
+ {"identifier":"urn:air:acme.com:agent:b","type":"application/json","url":"https://example.com/b.json","trustManifests":[{"contributor":"did:web:acme.com","attestations":[],"provenance":[],"trustSchema":{"identifier":"urn:trust:example","version":"1.0","verificationMethods":[]}}]}]}

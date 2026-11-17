@@ -1,0 +1,4 @@
+{"specVersion":"1.0","entries":[
+{"identifier":"urn:air:example.com:catalog:rel","displayName":"Relative","type":"application/ai-catalog+json","url":"relative.json"},
+{"identifier":"urn:air:example.com:catalog:loop","displayName":"Loopback","type":"application/ai-catalog+json","url":"https://127.0.0.1/x.json"}
+]}

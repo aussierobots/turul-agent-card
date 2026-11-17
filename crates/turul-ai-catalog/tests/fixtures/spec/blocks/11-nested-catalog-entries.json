@@ -1,0 +1,10 @@
+{
+  "identifier": "urn:air:acme.com:plugin:finance-suite",
+  "displayName": "Finance Plugin",
+  "type": "application/ai-catalog+json",
+  "url": "https://acme.com/plugins/finance-suite.json",
+  "publisher": {
+    "identifier": "did:web:acme-corp.com",
+    "displayName": "Acme Financial Corp"
+  }
+}

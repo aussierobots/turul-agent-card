@@ -1,0 +1,21 @@
+{
+  "specVersion": "1.0",
+  "entries": [
+    {
+      "identifier": "urn:example:catalog:child",
+      "displayName": "Child Catalog",
+      "type": "application/ai-catalog+json",
+      "url": "child.json"
+    },
+    {
+      "identifier": "urn:example:catalog:missing",
+      "type": "application/ai-catalog+json",
+      "url": "missing"
+    },
+    {
+      "identifier": "urn:example:catalog:extra",
+      "type": "application/ai-catalog+json",
+      "url": "extra.json"
+    }
+  ]
+}

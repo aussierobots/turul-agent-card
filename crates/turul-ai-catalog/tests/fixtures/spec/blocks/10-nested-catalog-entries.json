@@ -1,0 +1,27 @@
+{
+  "specVersion": "1.0",
+  "host": {
+    "displayName": "Acme Enterprise AI",
+    "identifier": "did:web:acme-corp.com"
+  },
+  "entries": [
+    {
+      "identifier": "urn:air:acme.com:catalog:finance",
+      "displayName": "Finance Services",
+      "type": "application/ai-catalog+json",
+      "url": "https://acme.com/catalogs/finance.json"
+    },
+    {
+      "identifier": "urn:air:acme.com:catalog:ml",
+      "displayName": "ML Models",
+      "type": "application/ai-catalog+json",
+      "url": "https://acme.com/catalogs/ml.json"
+    },
+    {
+      "identifier": "urn:air:acme.com:catalog:devops",
+      "displayName": "DevOps Tools",
+      "type": "application/ai-catalog+json",
+      "url": "https://acme.com/catalogs/devops.json"
+    }
+  ]
+}

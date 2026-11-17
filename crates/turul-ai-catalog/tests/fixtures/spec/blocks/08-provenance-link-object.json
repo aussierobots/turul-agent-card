@@ -1,0 +1,8 @@
+{
+  "relation": "publishedFrom",
+  "sourceId": "https://github.com/acme-corp/finance-agent",
+  "sourceDigest": "sha256:fedcba0987654321fedcba0987654321fedcba0987654321fedcba0987654321",
+  "registryUri": "oci://registry.acme-corp.com/agents/finance",
+  "statementUri": "https://trust.acme-corp.com/provenance/finance-agent-v2.1.json",
+  "signatureRef": "did:web:acme-corp.com#key-1"
+}

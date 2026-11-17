@@ -1,0 +1,25 @@
+[package]
+name = "turul-ai-catalog-cli"
+description = "Command line for AI Catalog: validate, list, view, init, add and remove"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+rust-version.workspace = true
+publish = true
+readme = "README.md"
+categories = ["command-line-utilities", "web-programming"]
+exclude = ["tests/fixtures"]
+
+[[bin]]
+name = "turul-ai-catalog"
+path = "src/main.rs"
+doc = false
+
+[dependencies]
+turul-ai-catalog = { workspace = true }
+turul-ai-catalog-client = { workspace = true }
+turul-ai-catalog-tui = { workspace = true }
+clap = { workspace = true }

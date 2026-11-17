@@ -1,0 +1,78 @@
+{
+  "specVersion": "1.0",
+  "host": {
+    "displayName": "Example Host",
+    "identifier": "did:web:host.example",
+    "logoUrl": "https://host.example/logo.png"
+  },
+  "entries": [
+    {
+      "identifier": "urn:example:agent:named",
+      "displayName": "Named Agent",
+      "type": "application/a2a-agent-card+json",
+      "url": "https://host.example/agents/named.json"
+    },
+    {
+      "identifier": "urn:example:agent:plain",
+      "type": "application/a2a-agent-card+json",
+      "url": "https://host.example/agents/plain.json",
+      "updatedAt": "yesterday"
+    },
+    {
+      "identifier": "urn:example:mcp:described",
+      "type": "application/mcp-server-card+json",
+      "url": "https://host.example/mcp/described.json",
+      "description": "Answers questions about invoices."
+    },
+    {
+      "identifier": "urn:example:skill:versioned",
+      "type": "application/agent-skills+md",
+      "url": "https://host.example/skills/versioned.md",
+      "version": "2.1.0"
+    },
+    {
+      "identifier": "urn:example:catalog:inline",
+      "displayName": "Inline Catalog",
+      "type": "application/ai-catalog+json",
+      "data": {
+        "specVersion": "1.0",
+        "entries": [
+          {
+            "identifier": "urn:example:agent:inner",
+            "displayName": "Inner Agent",
+            "type": "application/a2a-agent-card+json",
+            "url": "https://host.example/agents/inner.json"
+          }
+        ]
+      }
+    },
+    {
+      "identifier": "urn:example:catalog:relative",
+      "type": "application/ai-catalog+json",
+      "url": "teams/catalog.json"
+    },
+    {
+      "identifier": "urn:example:agent:signed",
+      "displayName": "Signed Agent",
+      "type": "application/a2a-agent-card+json",
+      "url": "https://host.example/agents/signed.json",
+      "digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "trustManifests": [
+        {
+          "contributor": "did:web:signer.example",
+          "subject": {
+            "identifier": "urn:example:agent:signed",
+            "type": "application/a2a-agent-card+json",
+            "digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "signature": {
+            "signer": "did:web:signer.example",
+            "profile": "did-web-v1",
+            "issuedAt": "2026-01-01T00:00:00Z",
+            "jws": "eyJhbGciOiJFUzI1NiIsInR5cCI6ImFpLWNhdGFsb2ctdHJ1c3QtbWFuaWZlc3QrandzIn0..c2lnbmF0dXJlLWJ5dGVz"
+          }
+        }
+      ]
+    }
+  ]
+}

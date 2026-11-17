@@ -1,0 +1,1 @@
+{"specVersion":"1.0","entries":[{"identifier":"urn:air:example.com:catalog:inline","displayName":"Inline","type":"application/ai-catalog+json","data":{"specVersion":"1.0","entries":[{"identifier":"","type":"application/x-unknown","url":"https://example.com/n"}]}}]}

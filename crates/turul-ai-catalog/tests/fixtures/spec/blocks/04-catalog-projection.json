@@ -1,0 +1,17 @@
+{
+  "identifier": "https://registry.example/ids/artifacts/7bf4a8c2",
+  "type": "application/a2a-agent-card+json",
+  "url": "https://registry.example/apis/registry/v3/groups/payments/artifacts/fraud-agent",
+  "publisher": {
+    "identifier": "did:web:acme.example",
+    "displayName": "Acme"
+  },
+  "extensions": {
+    "com.example.registry.coordinates": {
+      "registryUri": "https://registry.example",
+      "sourceIdentifier": "foo",
+      "namespace": "payments",
+      "name": "fraud-agent"
+    }
+  }
+}

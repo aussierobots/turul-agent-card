@@ -1,0 +1,1 @@
+{"contributor":"did:web:acme.com","signature":{"issuedAt":"2026-09-12T10:00:00Z","profile":"did-web-v1","signer":"did:web:acme.com"},"subject":{"digest":"sha256:56bbd2ff730d81a52951fc2f58809dfb086b4be7a82766dcc18cfe32ff6acbbd","identifier":"urn:air:acme.com:agent:finance","type":"application/a2a-agent-card+json"}}

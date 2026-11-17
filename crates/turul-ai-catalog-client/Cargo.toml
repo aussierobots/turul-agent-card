@@ -1,0 +1,22 @@
+[package]
+name = "turul-ai-catalog-client"
+description = "Load AI Catalog documents from files and HTTPS with Safe Fetching"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+rust-version.workspace = true
+publish = true
+readme = "README.md"
+categories = ["web-programming", "parser-implementations"]
+exclude = ["tests/fixtures"]
+
+[dependencies]
+turul-ai-catalog = { workspace = true }
+reqwest.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+sha2.workspace = true

@@ -1,0 +1,37 @@
+[package]
+name = "turul-ai-catalog-lambda"
+description = "AWS Lambda handler serving a bundled AI Catalog at the well-known URI"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "turul-ai-catalog-lambda"
+path = "src/main.rs"
+doc = false
+
+# Local development server: `cargo run -p turul-ai-catalog-lambda --features local --bin turul-ai-catalog-serve`.
+[[bin]]
+name = "turul-ai-catalog-serve"
+path = "src/bin/serve.rs"
+doc = false
+required-features = ["local"]
+
+[features]
+local = ["dep:axum", "tokio/net", "tokio/signal"]
+
+[dependencies]
+turul-ai-catalog = { workspace = true }
+lambda_http = { workspace = true }
+tokio = { workspace = true }
+axum = { workspace = true, optional = true }
+
+[dev-dependencies]
+turul-ai-catalog-client = { workspace = true }
+ai-catalog = { workspace = true }
+ai-catalog-validate = { workspace = true }

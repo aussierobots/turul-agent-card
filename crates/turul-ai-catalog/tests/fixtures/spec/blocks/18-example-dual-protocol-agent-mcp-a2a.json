@@ -1,0 +1,41 @@
+{
+  "identifier": "urn:air:acme.com:agent:finance",
+  "displayName": "Acme Finance Agent",
+  "type": "application/ai-catalog+json",
+  "description": "Finance agent accessible via both MCP and A2A protocols.",
+  "tags": [
+    "finance",
+    "dual-protocol"
+  ],
+  "publisher": {
+    "identifier": "did:web:acme.com",
+    "displayName": "Acme Financial Corp"
+  },
+  "data": {
+    "specVersion": "1.0",
+    "entries": [
+      {
+        "identifier": "urn:air:acme.com:agent:finance:mcp",
+        "type": "application/mcp-server-card+json",
+        "url": "https://api.acme-corp.com/mcp/server-card"
+      },
+      {
+        "identifier": "urn:air:acme.com:agent:finance:a2a",
+        "type": "application/a2a-agent-card+json",
+        "url": "https://api.acme-corp.com/agents/finance"
+      }
+    ]
+  },
+  "trustManifests": [
+    {
+      "contributor": "did:web:acme.com",
+      "attestations": [
+        {
+          "type": "SOC2-Type2",
+          "uri": "https://trust.acme-corp.com/reports/soc2.pdf",
+          "digest": "sha256:a1b2c3d4e5f67890abcdef1234567890abcdef1234567890abcdef1234567890"
+        }
+      ]
+    }
+  ]
+}

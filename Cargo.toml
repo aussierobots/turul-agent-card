@@ -1,0 +1,50 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/turul-ai-catalog",
+    "crates/turul-ai-catalog-client",
+    "crates/turul-ai-catalog-trust",
+    "crates/turul-ai-catalog-tui",
+    "crates/turul-ai-catalog-cli",
+    "crates/turul-ai-catalog-lambda",
+]
+
+[workspace.package]
+version = "0.0.15"
+edition = "2024"
+authors = ["Nick Hortovanyi <nick@aussierobots.com.au>"]
+license = "Apache-2.0"
+repository = "https://github.com/aussierobots/turul-agent-card"
+keywords = ["ai-catalog", "agent-card", "agent", "a2a", "mcp"]
+rust-version = "1.95"
+
+[workspace.dependencies]
+turul-ai-catalog = { path = "crates/turul-ai-catalog", version = "0.0.15" }
+turul-ai-catalog-client = { path = "crates/turul-ai-catalog-client", version = "0.0.15" }
+turul-ai-catalog-tui = { path = "crates/turul-ai-catalog-tui", version = "0.0.15" }
+ratatui = "0.29.0"
+crossterm = "0.28.1"
+clap = { version = "4", features = ["derive"] }
+sha2 = "0.11"
+turul-jwt-validator = { version = "0.3.4", default-features = false, features = ["detached_rust_crypto"] }
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls"] }
+url = "2"
+lambda_http = "1"
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+tokio = { version = "1", default-features = false, features = ["rt", "macros"] }
+ai-catalog = "=0.4.0"
+ai-catalog-validate = "=0.4.0"
+ai-catalog-trust = "=0.4.0"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = 0
+
+[profile.test.package."*"]
+debug = 0

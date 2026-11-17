@@ -1,0 +1,26 @@
+{
+  "specVersion": "1.0",
+  "entries": [
+    {
+      "identifier": "urn:air:treasury.gov:okf:fiscaldata",
+      "type": "text/vnd.okf+markdown",
+      "tags": ["finance", "treasury"],
+      "extensions": {
+        "https://ai-catalog.org/extensions/metadata": {
+          "location": "US-West",
+          "environment": "staging",
+          "version-compatible": [">=1.0.0"]
+        },
+        "https://openknowledgeformat.org/ns#": {
+          "@context": {
+            "us-gaap": "https://xbrl.fasb.org/us-gaap/",
+            "ifrs": "https://xbrl.ifrs.org/taxonomy/"
+          },
+          "type": "Financial Dataset",
+          "taxonomy": "us-gaap",
+          "conformsTo": ["us-gaap:Revenue", "ifrs:Revenue"]
+        }
+      }
+    }
+  ]
+}

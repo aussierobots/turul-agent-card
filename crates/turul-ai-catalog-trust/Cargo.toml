@@ -1,0 +1,22 @@
+[package]
+name = "turul-ai-catalog-trust"
+description = "Signed payloads, artifact digests and signing for AI Catalog trust"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+turul-ai-catalog = { workspace = true }
+turul-ai-catalog-client = { workspace = true }
+sha2.workspace = true
+turul-jwt-validator.workspace = true
+
+[dev-dependencies]
+ai-catalog-trust.workspace = true
+ai-catalog.workspace = true
+ai-catalog-validate.workspace = true

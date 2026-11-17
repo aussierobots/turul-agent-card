@@ -1,0 +1,10 @@
+{"specVersion":"1.0","entries":[
+{"identifier":"urn:air:example.com:data:o1","type":"application/x-unknown","displayName":"Obj","description":"d-o1","data":{"k":"v1"}},
+{"identifier":"urn:air:example.com:data:a1","type":"application/x-unknown","displayName":"Arr","description":"d-a1","data":["a1","b2"]},
+{"identifier":"urn:air:example.com:data:s1","type":"application/x-unknown","displayName":"Str","description":"d-s1","data":"s3"},
+{"identifier":"urn:air:example.com:data:n1","type":"application/x-unknown","displayName":"Num","description":"d-n1","data":4242},
+{"identifier":"urn:air:example.com:card:o2","type":"application/a2a-agent-card+json","displayName":"Obj","description":"d-o2","data":{"k":"v1"}},
+{"identifier":"urn:air:example.com:card:a2","type":"application/a2a-agent-card+json","displayName":"Arr","description":"d-a2","data":["a1","b2"]},
+{"identifier":"urn:air:example.com:card:s2","type":"application/a2a-agent-card+json","displayName":"Str","description":"d-s2","data":"s3"},
+{"identifier":"urn:air:example.com:card:n2","type":"application/a2a-agent-card+json","displayName":"Num","description":"d-n2","data":4242}
+]}

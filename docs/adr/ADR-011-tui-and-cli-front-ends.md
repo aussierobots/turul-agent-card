@@ -1,0 +1,272 @@
+# ADR-011: TUI and CLI front ends
+
+- **Status:** Accepted (2026-11-17)
+- **Date:** 2026-11-17
+- **Implements:** `crates/turul-ai-catalog-tui/tests/render.rs` (S11); `crates/turul-ai-catalog-cli/tests/commands.rs`, `crates/turul-ai-catalog-cli/tests/producer_commands.rs`, `crates/turul-ai-catalog-cli/tests/dependency_direction.rs` and the client module `turul_ai_catalog_client::produce` (S12, 0.0.13).
+- **Depends on:** ADR-008 (`load`, `Source`, `FetchPolicy` including `max_requests`, `LoadError`, `LoadWarning` with `code()` and `Display`), ADR-009 (`ResolvedCatalog`, its entry rows, children, reports and `warnings`, `SkipReason` including `Budget`, `Filter`, `ResolvedCatalog::filter`, `DisplayText::new`, `ResolvedCatalog::to_json`), ADR-007 (`resolve::display_name`, reached through ADR-009's rows), ADR-005 (`Severity`, `Code`, `Conformance`), ADR-003 (`Json::to_canonical_vec`, `CanonicalError`), ADR-002 (`json::read`, used by `dependency_direction` to read `cargo metadata` and by `produce` to read a `--data` file; `parse::parse`, used by `produce`), ADR-004 (`EntryIdentifier`, `ArtifactType`, `HostIdentifier`, `CatalogEntry::key`, `SPEC_VERSION`), ADR-005 (`validate::validate`, `Report::has_errors`, used by `produce`), ADR-003 (`canonical::to_canonical_vec`, used by `produce`), ADR-010 (the lambda rules `dependency_direction` also pins). Binding decisions: M3 (thin front ends), M16 (the TUI shows the request-budget warning, the CLI prints it to stderr), M17 (producer commands), M12 and M13 (no verification in the front ends; signature defects never set exit 1), M15, D11 (`publish = true` for both), D15 (TUI `ratatui`, `crossterm`; CLI `clap` with `derive`).
+- **Spec:** https://ai-catalog.io, `specification/ai-catalog.md` as read in ADR-001 (last commit 2026-11-10).
+
+## Context
+
+M3: "The consumer logic lives in one crate, `turul-ai-catalog-client`. The CLI and TUI are thin presentation layers over it and hold no catalog logic of their own." DECISIONS M3 layering adds: fetching, nested traversal, display-name/description/version resolution and filtering each have one owning symbol in `turul-ai-catalog` or `turul-ai-catalog-client`; "a dependency-direction test fails if either re-implements them or depends on `reqwest` or `serde_json` directly"; "CLI text/JSON output and TUI rendering are both produced from the same client type". Out of scope: registry search, pull/cache, OCI, signing and verification commands (trust is a library, M9).
+
+Spec text this ADR implements:
+
+- #embedded-content-safety: "When the `data` field contains embedded artifact content, consumers MUST treat it as untrusted input. In particular: Content with HTML or script-capable media types MUST be sandboxed and MUST NOT be executed in the consumer's security context. Consumers SHOULD validate that the `data` content is well-formed JSON (or the expected format for the declared `type`) before processing."
+- #catalog-entry (`displayName`, `description`): "a consumer SHOULD render it as given", bounded by the MUST above (AMB-75, ADR-009).
+- #verification-result: "Failure MUST NOT be treated as a verified endorsement. Consumers MAY retain or display unverified content".
+- #privacy-considerations and #safe-fetching, consumed: front ends fetch nothing, so no logo, policy or attestation URL is ever requested by them (the client half is ADR-009's safe-fetching-5 and policy-urls-extension-4).
+
+Spec text that governs the producer commands (M17; §4). The producer guide `docs/guides/creating-a-catalog.md` is non-normative and is cited only where it agrees with these:
+
+- #top-level-structure: "An AI Catalog document is a JSON object that MUST contain the following members: `specVersion` … `entries` … This array MAY be empty." `host` is OPTIONAL.
+- #producer-behavior: "Producers MUST set `specVersion` to the version of this specification they implement. Producers SHOULD NOT set `specVersion` to a version higher than they actually conform to."
+- #host-info: "It MUST contain: `displayName`"; `identifier`, `documentationUrl` and `logoUrl` are OPTIONAL.
+- #catalog-entry: "It MUST contain the following members: `identifier` … `type`"; "A Catalog Entry MUST contain exactly one of the following members to provide the artifact content: `url` … `data`"; `displayName`, `description`, `tags`, `version` are OPTIONAL; `type` "is an open text format, so any string value is accepted"; `data` "is opaque to this specification".
+- #multi-version-entries (entry uniqueness): "When `version` is present, the combination of `identifier` and `version` MUST be unique within the catalog. When `version` is absent, `identifier` alone MUST be unique."
+- #level-1-minimal-catalog and #level-2-discoverable-catalog: Level 2 "Includes a `host` object identifying the catalog operator".
+- #catalog-snapshot-coverage: "Adding, removing, or changing a contribution therefore changes the catalog snapshot and requires a new catalog signature."
+- #unrecognized-members and #consumer-behavior: unrecognized members are ignored "and preserve[d] … when republishing".
+
+## Decision
+
+### 1. Crates and dependency direction
+
+| Crate | Kind | Normal dependencies (all `workspace = true`) | Dev-dependencies |
+|---|---|---|---|
+| `turul-ai-catalog-tui` | library, `publish = true` (D11) | `turul-ai-catalog`, `turul-ai-catalog-client`, `ratatui`, `crossterm` | none |
+| `turul-ai-catalog-cli` | binary `turul-ai-catalog` (`ai-catalog` is the official CLI's name), `publish = true` (D11) | `turul-ai-catalog`, `turul-ai-catalog-client`, `turul-ai-catalog-tui`, `clap` (`derive`) | none |
+
+- Workspace versions (D15 names the crates, not versions): `ratatui = "0.29.0"` and `crossterm = "0.28.1"`, the `crossterm` that `ratatui` 0.29.0 depends on, so one `crossterm` is built and `KeyEvent` is one type; 0.29.0 has `ratatui::init`, `ratatui::restore` and `backend::TestBackend`.
+- Neither crate depends on `turul-ai-catalog-trust`, `reqwest`, `url`, `serde_json`, `tokio` or `turul-ai-catalog-lambda`. `load` is blocking (PLAN §2 rules), so the CLI's `main` is plain synchronous code and needs no runtime.
+- `src/` of both crates holds no `std::net`, no `std::fs` and no `std::process::Command`: every byte of input arrives through `turul_ai_catalog_client::load`, a local file included (`Source::File`), and every byte the producer commands read or write goes through `turul_ai_catalog_client::produce` (§4); nothing is launched (no browser, pager, shell or URL opener). The CLI uses `std::process::ExitCode` only.
+- Front-end `src/` never calls `turul_ai_catalog::parse::parse`, `validate::validate`, `validate_at` or any `resolve::` function, never names `NestingDepth`, and never splits identifiers (`split(':')`, `rsplit(':')`, `urn:air`). It shows the values the client's `ResolvedCatalog` carries (AMB-126). It never builds or edits a catalog: no `AiCatalog::new`, `CatalogEntry::new`, `HostInfo::new`, `canonical::to_canonical_vec`, `entries.push`, `entries.retain` or `.key()` (M17).
+- `crates/turul-ai-catalog-cli/tests/dependency_direction.rs` is the one dependency-direction test in the workspace. It runs `cargo metadata --format-version 1 --no-deps --offline` (through `env!("CARGO")`), reads the output with `turul_ai_catalog::json::read` (no `serde_json`), and fails unless each crate's normal and dev dependency names equal the table above, and ADR-010's for the lambda (that function is added by S10, which creates the lambda crate; S12 runs first and has no lambda package to read). It scans `src/` of the TUI, the CLI and the lambda with needles built at run time. It is a guard against the named re-implementations only; a re-implementation that matches no needle is adr-review check 3's.
+
+### 2. TUI (`turul-ai-catalog-tui`)
+
+Public symbols: `render(&ResolvedCatalog, &ViewState, &mut Frame)`, `ViewState` (`ViewState::new()`, `ViewState::on_key(&mut self, KeyEvent, &ResolvedCatalog) -> Action`), `Action::{Continue, Quit}`, `run(ResolvedCatalog) -> Result<(), RunError>`, `RunError::{NotATerminal, Io(std::io::Error)}`. Enums are `#[non_exhaustive]`; `RunError` implements `Display` and `std::error::Error`.
+
+- `render` is pure: it draws from its two arguments only, so `ratatui::backend::TestBackend` drives every test.
+- Layout: a list of every catalog node in the tree in the client's order, each with its entry rows, its skipped children (`Skipped(Budget | Depth | Cycle | Unresolvable | Fetch)` with the reason and the child `url`; `Fetch` adds the `LoadError`'s `Display`) and its `warnings`, one line per `LoadWarning` with the fixed label `warning`, its `code()` and its `Display` (M16, AMB-128); a detail pane for the selected entry (identifier, type, version, display name, description, `url` or `data`, and the number of trust manifests); and that node's diagnostics (severity, code, JSON Pointer) with its `Conformance`.
+- Every string that comes from a document, a report or a URL reaches the buffer only as `DisplayText` (ADR-009): identifiers, types, versions, display names, descriptions, URLs, host fields, diagnostic paths, skip URLs, `LoadError` and `LoadWarning` `Display` text and `data` text (AMB-124). Only the TUI's own fixed labels are drawn directly.
+- `data` (AMB-59, AMB-120): shown only as `DisplayText::new` of the UTF-8 text of `data.to_canonical_vec()`, whatever the entry `type` is. `type` never selects a renderer: no HTML, Markdown, image, hyperlink (OSC 8) or terminal-graphics output exists. When the writer refuses (`CanonicalError::NotIJson { pointer }`, ADR-003), the pane shows the fixed text `data not shown: not I-JSON at ` followed by the pointer as `DisplayText`, and nothing else of `data`.
+- Trust manifests (AMB-127): only their count is shown, with the fixed label `trust manifests (not verified)`. No front end shows `signer`, `profile` or any signature content as an endorsement, because none verifies (M12, M13).
+- Keys: Up/Down and `k`/`j` move the selection within bounds; `q`, Esc and Ctrl-C give `Action::Quit`; every other key gives `Action::Continue` and changes nothing.
+- `run` returns `RunError::NotATerminal` before touching the terminal unless both stdin and stdout are terminals (`std::io::IsTerminal`) (AMB-125). Otherwise it uses `ratatui::init` and `ratatui::restore` (restore also on panic, through ratatui's hook), loops draw → read key → `on_key` until `Quit`, and returns.
+
+### 3. CLI (`turul-ai-catalog`)
+
+```
+turul-ai-catalog validate [--format text|json]        (--file PATH | --url URL | --well-known HOST)
+turul-ai-catalog list     [--format text|json] [FILTER] (--file PATH | --url URL | --well-known HOST)
+turul-ai-catalog view                                 (--file PATH | --url URL | --well-known HOST)
+```
+
+- Exactly one source flag, enforced by a required `clap` argument group (AMB-121): `--file` → `Source::File`, `--url` → `Source::Url`, `--well-known` → `Source::WellKnown`. The value is passed unchanged; the CLI never classifies a string as a path or a URL. Every command calls `load(&source, &FetchPolicy::default())`; the CLI exposes no switch that loosens Safe Fetching (D16's `permit_loopback_http` stays a library setting).
+- `FILTER`: one flag per `Filter` field (ADR-009), named as the field in kebab case, value passed unchanged; `list` prints `resolved.filter(&filter)`. The CLI never matches entries itself.
+- `--format` defaults to `text`. `json` writes exactly the bytes of `to_json().to_canonical_vec()` of the (filtered, for `list`) `ResolvedCatalog` to stdout, with no trailing newline (AMB-123). `validate` and `list` therefore emit the same JSON document for the same tree; they differ in their text form.
+- `text`: `validate` prints, per catalog node, its location, its `Conformance`, one line per diagnostic (severity, code, pointer) and one line per skipped child (reason, `url`); `list` prints one line per entry row (display name, identifier, type, version). Every document-derived string goes through `DisplayText` (AMB-124). The text form is for people and is not a contract; the JSON form is (ADR-009 golden).
+- `view` hands the loaded `ResolvedCatalog` to `turul_ai_catalog_tui::run`.
+- Load warnings (M16, AMB-128): `validate` and `list`, in both formats, write to stderr one line `warning <code>: <Display>` (through `DisplayText`) per `LoadWarning` of every node, root first then tree order, after loading and before stdout output; `list` writes those of the unfiltered tree. `view` writes none, because stderr shares the terminal with the TUI, which shows them. A load warning never changes the exit code: it is a retrieval outcome, not a document diagnostic (ADR-009 AMB-192).
+- Load failures and other failures go to stderr, through `DisplayText`, never to stdout.
+
+Exit codes (PLAN §2, one rule for every command, AMB-122):
+
+| Code | When |
+|---|---|
+| 0 | the loaded tree has no error diagnostic |
+| 1 | the loaded tree has at least one error diagnostic (`ResolvedCatalog::has_errors()`, ADR-009), decided on the unfiltered tree; output was written |
+| 2 | usage error (`clap`'s own exit code 2); `load` failed (the root could not be read, fetched, accepted or parsed, M15 included); `view` without a terminal (`RunError::NotATerminal`) or a terminal I/O error; the writer refused the JSON output (`NotIJson`); stdout could not be written |
+
+M13: a malformed JWS header or a non-root `did:web` signer produces no diagnostic at all (M12; ADR-012 trade-off 3) and the front ends never verify, so such a catalog exits 0. `--help` and `--version` exit 0 (`clap`).
+
+### 4. Producer commands (M17)
+
+```
+turul-ai-catalog init   --file PATH [--host-display-name TEXT [--host-identifier TEXT] [--host-documentation-url URL] [--host-logo-url URL]]
+turul-ai-catalog add    --file PATH --identifier TEXT --type TEXT (--url URL | --data PATH)
+                        [--display-name TEXT] [--description TEXT] [--version TEXT] [--tag TEXT]...
+turul-ai-catalog remove --file PATH --identifier TEXT [--version TEXT]
+```
+
+`--file PATH` names the catalog file the command writes (and, for `add` and `remove`, first reads). Every value is passed unchanged as a `String` (or a path); the CLI neither trims, normalises nor checks any of them. `clap` enforces only argument shape: required flags, the `--url`/`--data` group (exactly one, required), and `requires = "host_display_name"` on the three other host flags (AMB-341). Each command builds one `Change` value and calls `turul_ai_catalog_client::produce(path, &change)` once; that is the CLI's whole part.
+
+Argument → model mapping, performed only inside `produce` through the ADR-002/ADR-004 constructors:
+
+| Command | Argument | Model field (spec member) |
+|---|---|---|
+| `init` | — | `AiCatalog::new(vec![])`: `spec_version` = `identity::SPEC_VERSION` (`specVersion`, AMB-340), `entries` empty |
+| `init` | `--host-display-name` | `host = Some(HostInfo::new(v))` (`host.displayName`); absent → `host = None` (Level 1) |
+| `init` | `--host-identifier` | `host.identifier = Some(HostIdentifier::new(v))` |
+| `init` | `--host-documentation-url` | `host.documentation_url = Some(v)` |
+| `init` | `--host-logo-url` | `host.logo_url = Some(v)` |
+| `add` | `--identifier`, `--type` | `CatalogEntry::new(EntryIdentifier::new(v), ArtifactType::new(v), source)` |
+| `add` | `--url` | `source = ArtifactSource::Url(v)` |
+| `add` | `--data PATH` | `source = ArtifactSource::Data(json::read(&bytes of PATH)?)` (AMB-345) |
+| `add` | `--display-name`, `--description`, `--version` | `display_name`, `description`, `version` = `Some(v)`; absent flag → `None` |
+| `add` | `--tag` (repeatable) | `tags = Some(values in command-line order)`; no `--tag` → `None` (AMB-348) |
+| `add` | — | the entry is appended at the end of `entries` (AMB-342) |
+| `remove` | `--identifier`, `--version` | removes every entry `e` with `e.key().identifier().as_str() == identifier` and `e.key().version() == version.as_deref()` (AMB-344) |
+
+No command sets `updatedAt`, `publisher`, `digest`, `trustManifests`, `extensions` or `signature` (M17 names none of them; AMB-348).
+
+`produce` runs one fixed pipeline, and the CLI cannot reorder or skip a step:
+
+1. Start document. `init`: `ProduceError::Exists` if `path` exists (AMB-341); otherwise the new `AiCatalog`. `add`/`remove`: `std::fs::read(path)` (`ProduceError::Io`), then `parse::parse` (`ProduceError::Parse`); a document with a top-level `signature` gives `ProduceError::Signed` (AMB-346). Every member already in the file, unrecognized members included, is kept (AMB-347).
+2. Apply the change (table above). `remove` that matches no entry gives `ProduceError::NoMatch`. A `--data` file that cannot be read gives `ProduceError::Io`, one that is not a JSON text gives `ProduceError::Data(ParseError)`.
+3. `validate::validate(&catalog)`. Any `Severity::Error` diagnostic gives `ProduceError::Invalid(Report)`. This is the only uniqueness check: a duplicate `EntryKey` on `add` is ADR-005's `entry-duplicate`, and an unversioned entry beside a versioned one of the same `identifier` is `version-missing-in-group` (AMB-343). Warnings never refuse.
+4. `canonical::to_canonical_vec(&catalog)` (ADR-003). A refusal gives `ProduceError::NotIJson(CanonicalError)`.
+5. Atomic write (AMB-349): the bytes go to a temporary file created in the same directory as `path` (`.<file name>.tmp-<process id>`), which is flushed with `File::sync_all` and then moved over `path` with `std::fs::rename`. On any failure the temporary file is removed and `ProduceError::Io` is returned; `path` is never partly written. On success `produce` returns the `Report` of step 3.
+
+Steps 1 to 4 happen before any byte is written, so every refusal leaves the file system as it was. The file holds exactly `to_canonical_vec` bytes, with no trailing newline (AMB-123 applied to files).
+
+Output and exit codes (the §3 scheme, AMB-349):
+
+| Code | When | stdout | stderr |
+|---|---|---|---|
+| 0 | `produce` returned `Ok(report)`; the file was written | nothing | one line per diagnostic of `report` (warnings only), as in `validate` text |
+| 1 | `ProduceError::Invalid(report)`: the document the command would write has at least one error diagnostic; nothing was written | nothing | one line per diagnostic of `report` |
+| 2 | usage error (`clap`); every other `ProduceError` (`Exists`, `Io`, `Parse`, `Data`, `Signed`, `NoMatch`, `NotIJson`) | nothing | the error's `Display` |
+
+Every document-derived string on stderr (codes, pointers, values in an error message) goes through `DisplayText` (AMB-124).
+
+`turul_ai_catalog_client::produce` (module `crates/turul-ai-catalog-client/src/produce.rs`) is the one public creation API. Its types: `Change::{Init { host: Option<HostInput> }, Add(EntryInput), Remove { identifier: String, version: Option<String> }}`; `HostInput { display_name, identifier, documentation_url, logo_url }` and `EntryInput { identifier, artifact_type, content: Content, display_name, description, version, tags: Vec<String> }` with `String`/`Option<String>` fields; `Content::{Url(String), DataFile(PathBuf)}`; `ProduceError::{Exists, Io(std::io::Error), Parse(ParseError), Data(ParseError), Signed, NoMatch, Invalid(Report), NotIJson(CanonicalError)}`. All are `#[non_exhaustive]` with public constructors; `ProduceError` implements `Display` and `std::error::Error`. `HostInput` and `EntryInput` are the commands' raw inputs, not a second model: they hold unchecked strings and a data file path, and the only `HostInfo`/`CatalogEntry` values are built from them inside `produce`. It lives in the client because it reads and writes files, and the format crate has no I/O (M3 layering); it calls the format crate's `parse`, constructors, `validate` and `to_canonical_vec` and re-implements none of them.
+
+## Owning symbols and entrypoints
+
+| Key or artifact | Owner | Entrypoint |
+|---|---|---|
+| TUI drawing | `turul_ai_catalog_tui::render` | `run`; tests through `TestBackend` |
+| TUI state and keys | `ViewState`, `ViewState::on_key`, `Action` | `run` |
+| Terminal session | `turul_ai_catalog_tui::run`, `RunError` | CLI `view` |
+| Command line | the binary-private `clap` derive type in `crates/turul-ai-catalog-cli/src/main.rs` | `main` |
+| Exit-code rule | the binary-private mapping in `main.rs`, over `ResolvedCatalog::has_errors` (ADR-009), `LoadError`, `RunError` and `CanonicalError` | `main` |
+| CLI JSON output | none here: the bytes are `ResolvedCatalog::to_json` (ADR-009) through `Json::to_canonical_vec` (ADR-003) | `validate`/`list --format json` |
+| Displayed text | none here: `DisplayText::new` (ADR-009) | `render`; CLI text output |
+| Dependency-direction rule | `crates/turul-ai-catalog-cli/tests/dependency_direction.rs` | `cargo test -p turul-ai-catalog-cli` |
+| Catalog creation (load file or empty → apply change → validate → canonical bytes → atomic write) | `turul_ai_catalog_client::produce` with `Change`, `HostInput`, `EntryInput`, `Content`, `ProduceError` (§4) | CLI `init`, `add`, `remove` |
+| Producer command line and exit mapping | the binary-private `clap` derive type and mapping in `main.rs`, over `ProduceError` | `main` |
+| Produced file bytes | none here: `turul_ai_catalog::canonical::to_canonical_vec` (ADR-003) | `produce` step 4 |
+
+No derived artifact is owned here. The CLI's JSON output is ADR-009's artifact, with its golden and schema digest there; the CLI adds no byte to it. A produced catalog file is the canonical serialisation of the model (ADR-003's artifact, schema digest there); `produce` adds no byte to it. The one committed produced file, the lambda bundle, is ADR-010's.
+
+## Requirement → test
+
+Test paths: `render::` is `crates/turul-ai-catalog-tui/tests/render.rs`; `commands::`, `producer_commands::` and `dependency_direction::` are under `crates/turul-ai-catalog-cli/tests/`. `producer_commands` runs the binary (`env!("CARGO_BIN_EXE_turul-ai-catalog")`, `std::process::Command`) in a fresh temporary directory per test and reads results back with `turul_ai_catalog::parse::parse` and `canonical::to_canonical_vec` (normal dependencies of the CLI, so no dev-dependency is added).
+
+| Requirement | Spec text (short) | Test function |
+|---|---|---|
+| embedded-content-safety-2 | script-capable content "MUST be sandboxed" | `render::script_capable_data_is_shown_as_inert_text` (an entry of `type` `text/html` whose `data` is `"<script>alert(1)</script>\u001b]52;c;eA==\u0007"` appears as its canonical JSON text with U+FFFD for ESC and BEL; no ESC or BEL in any buffer cell) |
+| embedded-content-safety-3 | "MUST NOT be executed in the consumer's security context" | `render::data_is_shown_only_as_display_text_of_its_canonical_json` (object, array, string and number `data` under an unknown `type` and under `application/a2a-agent-card+json` render identically: the canonical JSON through `DisplayText`); guarded by `dependency_direction::sources_have_no_network_filesystem_or_process_access` |
+| producer-behavior-1 | "Producers MUST set `specVersion` to the version of this specification they implement" | `producer_commands::init_without_host_writes_the_minimal_catalog` (file bytes are exactly `{"entries":[],"specVersion":"1.0"}`, `"1.0"` being `SPEC_VERSION`) |
+| producer-behavior-2 | "SHOULD NOT set `specVersion` to a version higher than they actually conform to" | `producer_commands::add_and_remove_keep_the_spec_version_of_the_file` (`add`/`remove` on a `specVersion` `1.0` file keep `1.0`); no command takes a `specVersion` argument (AMB-340) |
+
+Keyword sentences in the cited sections owned elsewhere, consumed here:
+
+| Requirement | Owner | Front-end test that consumes it |
+|---|---|---|
+| embedded-content-safety-1 ("MUST treat it as untrusted input") | ADR-009, client `tests/display_text.rs` | `render::no_control_character_reaches_the_buffer`, `commands::control_characters_never_reach_text_output` |
+| embedded-content-safety-4 ("SHOULD validate that the `data` content is well-formed JSON") | ADR-002, `tests/artifact_source.rs` | — (`data` is `Json` by construction) |
+| catalog-entry-12, catalog-entry-15 ("render it as given") | ADR-007, `tests/resolution.rs`; AMB-75 ADR-009 | `render::each_row_shows_the_resolved_display_name_as_display_text` |
+| verification-result-1 ("MUST NOT be treated as a verified endorsement") | ADR-015, trust `tests/signature_acceptance.rs` | `render::trust_manifests_are_shown_as_not_verified`, `commands::validate_exits_0_when_only_signature_defects_are_present` |
+| top-level-structure (`specVersion`, `entries`, "MAY be empty"), catalog-entry required members and "exactly one of" `url`/`data` | ADR-002, `tests/required_members.rs`, `tests/artifact_source.rs` | `producer_commands::init_without_host_writes_the_minimal_catalog`, `producer_commands::add_requires_exactly_one_of_url_and_data` |
+| host-info-1 ("MUST contain: `displayName`") | ADR-002 | `producer_commands::host_flags_without_display_name_are_a_usage_error` |
+| multi-version-entries (identifier/version uniqueness) | ADR-005, `tests/entry_uniqueness.rs`; key ADR-004 | `producer_commands::add_with_a_duplicate_entry_key_is_refused_and_writes_nothing`, `producer_commands::add_of_an_unversioned_entry_beside_a_versioned_one_is_refused`, `producer_commands::add_of_the_same_identifier_with_distinct_versions_is_written` |
+| level-2-discoverable-catalog ("Includes a `host` object") | ADR-005, `tests/conformance_level.rs` | `producer_commands::init_with_host_writes_a_discoverable_catalog` |
+| catalog-snapshot-coverage ("requires a new catalog signature") | ADR-013 (payload) | `producer_commands::add_and_remove_refuse_a_signed_catalog` |
+| unrecognized-members / consumer-behavior ("preserve them when republishing") | ADR-002, ADR-003, `tests/unrecognized_members.rs` | `producer_commands::add_and_remove_preserve_members_they_do_not_set` |
+
+Maintainer decisions and plan ambiguities owned here:
+
+| Id | Decision (short) | Test function |
+|---|---|---|
+| M3 (thin front ends) | front ends depend only on the table in §1 and call the client's symbols | `dependency_direction::tui_dependencies_are_exactly_the_allowed_set`, `dependency_direction::cli_dependencies_are_exactly_the_allowed_set`, `dependency_direction::front_ends_do_not_reimplement_consumer_logic` |
+| M3 (one client type) | CLI output and TUI rendering come from the same `ResolvedCatalog` | `commands::list_json_is_the_canonical_bytes_of_the_resolved_catalog`, `commands::validate_json_is_the_canonical_bytes_of_the_resolved_catalog`, `render::each_row_shows_the_resolved_display_name_as_display_text` |
+| dependency_direction (PLAN §2) | no trust crate, `reqwest`, `serde_json`, `std::net` or `std::fs` in either front end; the lambda per ADR-010 | `dependency_direction::tui_dependencies_are_exactly_the_allowed_set`, `dependency_direction::cli_dependencies_are_exactly_the_allowed_set`, `dependency_direction::lambda_dependencies_are_exactly_the_allowed_set` (added by S10 with the lambda crate, ADR-010 M2 row), `dependency_direction::sources_have_no_network_filesystem_or_process_access`, `dependency_direction::only_the_format_crate_spells_the_well_known_path_or_media_type` |
+| M13 | signature defects never set exit 1 and are never shown as endorsements | `commands::validate_exits_0_when_only_signature_defects_are_present` (a malformed `jws` header; `signer` `did:web:Example.com`), `render::trust_manifests_are_shown_as_not_verified` |
+| M15 | a Signature object missing a required member is a load failure | `commands::signature_missing_a_required_member_exits_2` |
+| PLAN §2 exit codes | 0, 1, 2 | `commands::validate_exits_0_for_a_catalog_without_errors`, `commands::validate_exits_1_for_a_catalog_with_an_error_diagnostic` (including an error inside an inline nested catalog in `data`), `commands::list_exits_1_for_a_catalog_with_an_error_diagnostic`, `commands::usage_error_exits_2`, `commands::missing_file_exits_2`, `commands::unparseable_file_exits_2`, `commands::url_refused_by_safe_fetching_exits_2` (`--url http://127.0.0.1:9/`) |
+| S11 | TUI rows, skipped children and diagnostics | `render::each_row_shows_the_resolved_display_name_as_display_text`, `render::no_control_character_reaches_the_buffer` (ESC, BEL and U+009B in `displayName`, `description`, `identifier`, a `url`, a diagnostic pointer from an `extensions` key and `data`), `render::skipped_children_are_shown_with_their_reason` (all five reasons), `render::diagnostics_are_shown_with_severity_code_and_pointer` |
+| M16 (TUI) | the request-budget warning is shown | `render::load_warnings_are_shown_with_code_and_message` (a file root with child `https://example.invalid/x.json` loaded with `max_requests: 0` shows `warning`, `request-budget`, and a `Display` containing `0` and `1`; `MediaTypeGeneric` pushed onto a second load's root `warnings` shows `media-type-generic` on that node, before its diagnostics) |
+| M16 (CLI) | the request-budget warning is printed to stderr and the exit code is unchanged | `crates/turul-ai-catalog-cli/src/main.rs` unit test `tests::load_warnings_are_one_stderr_line_each_and_keep_the_exit_code` (the binary-private stderr writer over a `load(Source::File)` tree with a pushed `RequestBudget { limit: 4, skipped: 3 }` writes exactly `warning request-budget: ` + its `Display`; the exit mapping still gives 0) |
+| AMB-129 | render tests build trees from real `load` results | every `render::` test (see AMB-129) |
+| S11 (keys) | selection stays in bounds; quit keys | `render::selection_moves_with_arrow_and_vi_keys_and_stays_in_bounds`, `render::quit_keys_end_the_session` |
+| S12 (`view`) | no terminal → 2 | `commands::view_without_a_terminal_exits_2` (stdin and stdout piped) |
+| AMB-59 | `data` never rendered as markup or executed | `render::data_is_shown_only_as_display_text_of_its_canonical_json`, `render::script_capable_data_is_shown_as_inert_text` |
+| AMB-120 | `data` the writer refuses is named, not shown | `render::data_that_cannot_be_canonicalised_is_named_not_shown` (a string holding U+FDD0 in `data`, refused under ADR-003 AMB-93, gives the fixed text and the pointer) |
+| AMB-121 | exactly one explicit source flag; default `FetchPolicy` | `commands::usage_error_exits_2` (no source flag; two source flags), `commands::url_refused_by_safe_fetching_exits_2` |
+| AMB-122 | one exit rule; unfiltered tree; skipped children do not set 1; writer refusal is 2 | `commands::skipped_children_are_reported_and_do_not_change_the_exit_code` (a file root with children `https://127.0.0.1/x.json` and `relative.json` exits 0 and prints both skips), `commands::filter_does_not_change_the_exit_code`, `commands::json_output_refused_by_the_writer_exits_2` (a `displayName` holding U+FDD0, ADR-003 AMB-93) |
+| AMB-123 | JSON output is the canonical bytes exactly, no trailing newline | `commands::list_json_is_the_canonical_bytes_of_the_resolved_catalog`, `commands::validate_json_is_the_canonical_bytes_of_the_resolved_catalog` |
+| AMB-124 | every document-derived string in text output passes through `DisplayText`, pointers included | `commands::control_characters_never_reach_text_output` (an `extensions` key holding ESC gives an `extension-key-invalid` error, ADR-005 §4, whose pointer is printed with U+FFFD), `render::no_control_character_reaches_the_buffer` |
+| AMB-125 | `view` needs stdin and stdout to be terminals | `commands::view_without_a_terminal_exits_2` |
+| AMB-126 | front ends show client values and never call `parse`, `validate` or `resolve` | `dependency_direction::front_ends_do_not_reimplement_consumer_logic`, `render::each_row_shows_the_resolved_display_name_as_display_text` (each row equals `DisplayText::new` of `resolve::display_name(entry, None)`, computed in the test) |
+| AMB-127 | trust manifests shown only as a count labelled not verified | `render::trust_manifests_are_shown_as_not_verified` |
+| M17 (producer commands) | `init`, `add`, `remove` build through the model constructors and write canonical bytes | `producer_commands::init_without_host_writes_the_minimal_catalog`, `producer_commands::init_with_host_writes_a_discoverable_catalog` (all four host flags map to their members), `producer_commands::add_maps_each_flag_to_its_member` (every `add` flag, three `--tag`s in order), `producer_commands::output_is_the_canonical_bytes_without_a_trailing_newline` (after each command, file bytes equal `to_canonical_vec(parse(file))`) |
+| M17 (refuse on error) | no write when `validate` reports an error | `producer_commands::add_with_a_duplicate_entry_key_is_refused_and_writes_nothing` (exit 1; file byte-identical; stderr names `entry-duplicate`), `producer_commands::add_with_an_error_diagnostic_is_refused_and_writes_nothing` (`--identifier ""` gives `identifier-empty`, exit 1), `producer_commands::warnings_do_not_refuse_the_write` (`--host-logo-url https://example.com/logo.png` gives `logo-url-not-data-uri`, exit 0, file written) |
+| M17 (one owner, M3) | the CLI has no catalog logic; `produce` is the one writer of catalog files | `dependency_direction::front_ends_do_not_build_or_edit_catalogs` (needles `AiCatalog::new`, `CatalogEntry::new`, `HostInfo::new`, `canonical::to_canonical_vec`, `entries.push`, `entries.retain`, `.key()` in CLI and TUI `src/`), `dependency_direction::only_produce_writes_catalog_files` (`fs::rename`, `fs::write` and `File::create` appear in workspace `src/` only in `crates/turul-ai-catalog-client/src/produce.rs`), `dependency_direction::sources_have_no_network_filesystem_or_process_access` |
+| AMB-340 | `specVersion` is `SPEC_VERSION`; no argument sets it | `producer_commands::init_without_host_writes_the_minimal_catalog`, `producer_commands::add_and_remove_keep_the_spec_version_of_the_file`, `producer_commands::usage_errors_exit_2` (`--spec-version 1.1` is unknown) |
+| AMB-341 | `init` never overwrites; host flags need `--host-display-name` | `producer_commands::init_refuses_an_existing_file` (exit 2; file byte-identical), `producer_commands::host_flags_without_display_name_are_a_usage_error` |
+| AMB-342 | `add` appends; `remove` keeps the order of the rest | `producer_commands::add_appends_entries_in_command_order`, `producer_commands::remove_deletes_only_the_entry_with_the_matching_key` |
+| AMB-343 | uniqueness only through `validate` | `producer_commands::add_with_a_duplicate_entry_key_is_refused_and_writes_nothing`, `producer_commands::add_of_an_unversioned_entry_beside_a_versioned_one_is_refused` (`version-missing-in-group`, exit 1), `producer_commands::add_of_the_same_identifier_with_distinct_versions_is_written` |
+| AMB-344 | `remove` matches the `EntryKey` exactly; no match is 2 | `producer_commands::remove_deletes_only_the_entry_with_the_matching_key` (entries `(x, None)`, `(x, "1")`, `(x, "")`: `remove --identifier x` leaves the two versioned ones; `--version ""` removes only `(x, "")`), `producer_commands::remove_without_a_matching_key_exits_2` (file byte-identical) |
+| AMB-345 | `--data` is a JSON file read strictly; values unchanged | `producer_commands::add_data_file_is_embedded_as_its_json_value` (object, array, string and `null` files), `producer_commands::add_data_file_that_is_not_json_exits_2` (invalid JSON; a duplicate member), `producer_commands::add_non_i_json_data_exits_2` (`1e400`, `NotIJson`, file byte-identical), `producer_commands::add_inexact_data_number_is_written_in_its_rfc_8785_form` (`9007199254740993` written `9007199254740992`, exit 0, `number-inexact` on stderr), `producer_commands::add_requires_exactly_one_of_url_and_data` (neither, both: exit 2) |
+| AMB-346 | `add`/`remove` refuse a catalog carrying `signature` | `producer_commands::add_and_remove_refuse_a_signed_catalog` (exit 2; file byte-identical) |
+| AMB-347 | members the command does not set are kept | `producer_commands::add_and_remove_preserve_members_they_do_not_set` (a file with `updatedAt`, `publisher`, `digest`, entry `trustManifests`, `extensions` and an unknown member on the root, host and an entry: each is unchanged after `add` and after `remove` of another entry) |
+| AMB-348 | no clock; absent flags give absent members | `producer_commands::add_maps_each_flag_to_its_member` (with no optional flag, the entry has exactly `identifier`, `type` and `url`), `producer_commands::repeated_commands_give_identical_bytes` (the same command sequence run twice, seconds apart, gives byte-identical files) |
+| AMB-349 | exit 0/1/2; stdout empty; atomic write | `producer_commands::usage_errors_exit_2`, `producer_commands::missing_target_file_exits_2` (`add` and `remove`), `producer_commands::producer_commands_write_nothing_to_stdout`, `producer_commands::no_temporary_file_remains` (after a success, a refusal (1) and a failure (2), the directory holds only the catalog file), `producer_commands::stderr_diagnostics_pass_through_display_text` (`add` to a file whose root `extensions` key holds ESC: that key is not reverse-DNS, so `extension-key-invalid` is an error (ADR-005 §4) and `add` exits 1 with the file byte-identical; the error's pointer is printed with U+FFFD; no ESC on stderr) |
+
+New ids (not in PLAN §6). The block AMB-120 to AMB-129 is used so that ids added concurrently by ADR-004 to ADR-009 (from AMB-98) cannot collide.
+
+- AMB-120: #embedded-content-safety leaves "sandboxed" undefined, and AMB-59 says `data` is shown only as `DisplayText` of its canonical JSON. A terminal cell grid that receives only `DisplayText` (no `Cc` character, so no escape sequence) cannot execute anything, whatever the content's media type, so it is the sandbox; `type` never changes the rendering. The canonical writer refuses some values (ADR-003 AMB-94, noncharacters AMB-93); showing a non-canonical spelling instead would need a second JSON writer (D4), so the TUI names the refusal and its pointer.
+- AMB-121: a positional argument would force the CLI to decide whether `example.com` is a file, a URL or a host, which is a classification rule M3 does not give the front end. Explicit flags map one-to-one onto `Source`. The default `FetchPolicy` keeps every #safe-fetching rule; D16's loopback switch exists for M4's tests and is not a user feature.
+- AMB-122: PLAN §2 gives 0 for no errors, 1 for errors and 2 for usage or load failure without saying which tree, which commands, or what a root parse failure is. Decisions: (a) "errors" are error diagnostics of every catalog the client loaded, root and `url` children, through the client's one predicate, so a nested child's error is not hidden; (b) the predicate runs on the unfiltered tree, because a filter is a view and does not change a document's validity; (c) a `Skipped` child is not an error of any loaded document (depth over the limit is a warning, AMB-45; an unreachable child is not this document's defect), so it is reported and does not set 1; (d) a root that `load` cannot parse yields no `ResolvedCatalog` to report on, so it is a load failure (2), as is a missing CDDL member (M15); (e) a writer refusal or a stdout write failure means the requested output does not exist, so 2; (f) the rule is the same for `validate`, `list` and `view`.
+- AMB-123: the S12 criterion is that `list --format json` stdout "equals `ResolvedCatalog::to_json` canonical bytes". Appending a newline would make the CLI a second producer of that artifact. Trade-off: JCS writes U+0080..U+009F as raw UTF-8 (RFC 8785 §3.2.2.2), so `--format json` sent to a terminal can carry a C1 control. JSON output is for programs; people use `text` or `view`, which go through `DisplayText`.
+- AMB-124: diagnostic pointers are built from member names, which come from the document (an `extensions` key, an unknown member). A pointer printed raw could carry an escape sequence to the terminal, which #embedded-content-safety's "untrusted input" forbids in spirit for every document string, not only `data`. Every document-derived string in text output and in the TUI goes through `DisplayText`. Trade-off (ADR-009's rule, not changed here): `DisplayText` replaces `Cc` only, so bidirectional format characters (`Cf`, for example U+202E) are shown as given and can reorder text visually; they cannot execute.
+- AMB-125: `ratatui` draws to stdout and `crossterm` reads key events from stdin; with either redirected the session cannot work. Both are checked before the terminal is touched, so a piped `view` exits 2 with no escape sequence written.
+- AMB-126: M3 gives display-name, description and version resolution one owner. If a front end called `resolve::display_name` itself it would have to choose the caller-supplied artifact value (step 2), and the CLI and TUI could choose differently. The client's entry rows carry the resolved values (no front end fetches an artifact, AMB-13), and both front ends show those.
+- AMB-128: M16 says the TUI shows the budget warning and the CLI prints it to stderr; ADR-009 hands that half to this ADR. Every `LoadWarning` is shown, not only `request-budget`, because `media-type-generic` is the same kind of retrieval outcome (ADR-008 AMB-74) and a front end that showed one and hid the other would be choosing which client output counts. Warnings sit on the node that carries them (ADR-009 §1), so the TUI shows them per node and the CLI prints them in tree order. stderr, not stdout, keeps `--format json` stdout equal to the canonical bytes (AMB-123); the JSON already carries them as diagnostics (ADR-009). `view` prints nothing to stderr because the TUI owns the terminal from `ratatui::init` to `ratatui::restore`. The CLI cannot produce a load warning offline (no loopback switch, AMB-121, and a file root sends no request under the default 256), so its rule is pinned by a binary unit test over a pushed value; `dependency_direction` scans `src/` and that test uses no `std::net`, `std::fs` or `std::process::Command`.
+- AMB-129: `ResolvedCatalog` is `#[non_exhaustive]` and has no public constructor, so `render` tests start from `turul_ai_catalog_client::load(&Source::File(..), &policy)` of a fixture under `crates/turul-ai-catalog-tui/tests/fixtures/`, read by the client, not by the test. States reachable offline come from that load: `Skipped(Unresolvable)` (relative `url` from a file root), `Skipped(Fetch)` (`https://127.0.0.1/x.json`, refused by Safe Fetching before any request) and `Skipped(Budget)` with its `request-budget` warning (`max_requests: 0`). States that need a served response (`Skipped(Depth)`, `Skipped(Cycle)`, `media-type-generic`) are client values pushed onto the loaded tree's public `children` and `warnings`; `render` draws any tree, and producing those states is ADR-009's tested behaviour. The TUI therefore needs no loopback server and no dev-dependency.
+- AMB-127: #verification-result forbids treating a failure as an endorsement and permits displaying unverified content. The front ends never verify (M12; trust is a library, M3), so every manifest is unverified to them. Showing a `signer` beside an entry would read as an endorsement; the count with a fixed "not verified" label displays the content's presence without claiming anything.
+
+Producer ids (M17). The block AMB-340 to AMB-349 is reserved for this ADR's producer commands, so ids added concurrently cannot collide.
+
+- AMB-340: #producer-behavior: "Producers MUST set `specVersion` to the version of this specification they implement". The workspace implements `SPEC_VERSION` (ADR-004), and `AiCatalog::new` sets it, so `init` takes no version argument. `add` and `remove` keep the file's `specVersion` as parsed: `parse` accepts only major 1 (ADR-002), and rewriting a `1.1` file to `1.0` would change a document member the command was not asked to change (AMB-347). Trade-off: a file declaring a higher minor version than this workspace implements is still edited; the higher declaration was the original producer's, not this command's.
+- AMB-341: the spec is silent on overwriting. `init` creates a catalog, so an existing `path` is `ProduceError::Exists` (exit 2) and is never replaced; a deployer regenerating deletes the file first. No `--force` flag: nothing needs one. The existence check precedes the rename, so a file created between the two is replaced (accepted race; the command is a local authoring tool). #host-info: "It MUST contain: `displayName`", so the other host flags require `--host-display-name` at the `clap` level (exit 2), and `HostInput` cannot exist without `display_name`. Host `identifier` is opaque and never treated as verified (ADR-004 AMB-18).
+- AMB-342: #top-level-structure defines `entries` as an array, and array order is significant to JSON and to a catalog signature (#catalog-snapshot-coverage: "every entry in order"); the guide calls it "An ordered array". `add` appends, `remove` keeps the relative order of the remaining entries, so the file order is the command order and the output is reproducible.
+- AMB-343: #multi-version-entries states two MUSTs: (identifier, version) unique when `version` is present, identifier alone unique when absent. ADR-005's `validate` owns both (`entry-duplicate` on equal `EntryKey`; `version-missing-in-group` for an unversioned entry beside a versioned one of the same identifier). A second check in `produce` would be a parallel implementation of the rule, so `produce` relies on step 3 alone, and a duplicate on `add` exits 1 with `validate`'s diagnostic.
+- AMB-344: the spec gives no removal rule; the entry key is ADR-004's `EntryKey`, built only by `CatalogEntry::key`. `remove` compares each entry's key through its accessors with the given `--identifier` and `--version`, so no key is built from strings. An absent `--version` matches only an entry with no `version`; `--version ""` matches `version: ""` (ADR-004 AMB-70). In a file that passed step 3 at most one entry matches; a hand-written file with duplicates loses every match. Removing nothing is a failed request, so it is `ProduceError::NoMatch` (exit 2), not a silent success.
+- AMB-345: #catalog-entry: `data` is "A JSON value containing the complete artifact document inline … opaque to this specification", and `type` is open text. So `--data PATH` accepts any JSON text (object, array, string, number, `null`) read by the one reader `json::read` (strict RFC 8259, duplicate members rejected, ADR-002), with no check against `type`; a `type` of `application/ai-catalog+json` makes `validate` check it as a nested catalog (ADR-005). `--url` is stored unchanged and never fetched; any URL defect is `validate`'s. A value the canonical writer refuses (ADR-003) gives `NotIJson` (exit 2), because the file must hold canonical bytes.
+- AMB-346: #catalog-snapshot-coverage: "Adding, removing, or changing a contribution therefore changes the catalog snapshot and requires a new catalog signature." The CLI cannot sign (signing is the trust library's, M3, M9), and keeping the old `signature` would write a document whose signature no longer covers it. So `add` and `remove` refuse a file with a top-level `signature` (`ProduceError::Signed`, exit 2). Entry trust manifests are kept: each covers its own entry (#entry-release-coverage), which neither command changes.
+- AMB-347: #unrecognized-members and #consumer-behavior: unrecognized members are ignored and preserved "when republishing". `produce` edits the parsed model, which keeps every member (`unrecognized` on all object kinds, ADR-002) and every defined member the commands do not set, so `add`/`remove` change only the entry they add or remove. The file is rewritten in canonical form (ADR-003), so a hand-indented file is reformatted on its first edit; M17 makes tooling the only author, so that happens at most once.
+- AMB-348: `updatedAt` is OPTIONAL (#catalog-entry) and M17 lists no flag for it; stamping it from the clock would make the same commands give different bytes and break ADR-010's provenance test. No command reads a clock. Absent optional flags give absent members (never `""` or `[]`), so the minimal entry is exactly what #level-1-minimal-catalog requires. Repeated `--tag` values are kept in order and with duplicates (the spec states no uniqueness for `tags`).
+- AMB-349: the §3 scheme is reused: 1 means "the document has an error diagnostic" (here, the one that would have been written), 2 means "the requested output does not exist" (AMB-122 (e)). stdout stays empty, so a producer command never mixes the catalog with messages; the file is the output. Atomicity: a write in place could leave a truncated catalog if interrupted, which the lambda would then refuse at cold start; a temporary file in the same directory followed by `rename` replaces the file in one step on POSIX file systems (on Windows `std::fs::rename` replaces an existing file, without the same crash guarantee).
+
+## Divergences from ai-catalog-rust 0.4.0
+
+None. ai-catalog-rust 0.4.0 has no CLI or TUI crate; the official CLI (`github.com/Agent-Card/ai-catalog-cli`) is not in the ADR-001 corpus, so no behaviour of it is compared or claimed. The binary is named `turul-ai-catalog` so that both can be installed side by side. ADR-010's `live_probe` is the only place the official CLI runs.
+
+## Consequences
+
+- Two front ends with no catalog logic: a change to resolution, traversal, filtering or output bytes is made once, in the format crate or the client, and both front ends follow it.
+- The front ends never verify signatures and never show a manifest as trusted. Verification stays a library call (`turul-ai-catalog-trust`), as M3 and M9 decide.
+- `--url` and `--well-known` are exercised by `commands` only up to Safe Fetching refusal, because the CLI does not expose D16's loopback switch; successful remote loading is the client's tests (ADR-008, ADR-009). The exit-1 path for an error in a `url`-nested child is pinned by the client predicate's test in ADR-009, not by `commands`.
+- Plan drift recorded:
+  - PLAN §2 lists `run(ResolvedCatalog)`; it returns `Result<(), RunError>` so that `view` without a terminal can exit 2 (S12). `ViewState::on_key`, `Action` and `RunError` are added.
+  - The exit rule needs `ResolvedCatalog::has_errors()`, which PLAN §2's client row does not list. It belongs to ADR-009 (one owner for tree folds). S9 landed entry rows with the resolved display name (`EntryRow::name`) but no `has_errors`; S12 adds it to the client and to ADR-009 §1 and its revision log, never to a front end. S11 does not use it.
+  - PLAN S11's criterion names rows, ESC, skipped children and diagnostics; M16 adds the warning display (AMB-128) and `SkipReason::Budget` (ADR-009 §2c), so S11 also pins `render::load_warnings_are_shown_with_code_and_message` and five skip reasons.
+  - `dependency_direction` also pins the lambda's dependencies and sources (ADR-010), so the workspace has one dependency-direction test.
+  - PLAN §4 maps embedded-content-safety-3 to `render.rs`; this ADR also guards it by `dependency_direction`'s source scan.
+  - M17: PLAN §2's client row does not list `produce` and its types, and its cli row lists only `validate`, `list` and `view`. They are added here (§4). The client gains file writing (`std::fs::rename`) in `produce` only.
+  - M17 supersedes D18's "maintainer content" for the lambda bundle: it is produced by these commands (ADR-010).
+
+## Revision log
+
+| Date | Change |
+|---|---|
+| 2026-11-17 | Created for S11 and S12: crate dependencies, TUI `render`/`ViewState`/`run`, CLI commands, source flags and exit codes, `DisplayText` for every document-derived string, `data` display, trust manifests shown as not verified, the workspace's one `dependency_direction` test (front ends and lambda). AMB-120 to AMB-127 added. |
+| 2026-11-17 | M17: producer commands `init`, `add`, `remove` (§4) with argument → model mapping, the `turul_ai_catalog_client::produce` pipeline (start document, change, `validate`, `to_canonical_vec`, temp file + rename), exit codes 0/1/2, owning-symbol rows, `producer_commands` and two `dependency_direction` tests, spec anchors for producers. AMB-340 to AMB-349 added. |
+| 2026-11-17 | S11, M16: TUI shows `Skipped(Budget)` and every node's `LoadWarning` (code and `Display`); CLI `validate`/`list` print load warnings to stderr without changing the exit code; `ratatui` 0.29.0 and `crossterm` 0.28.1 pinned; render tests build trees from real `load` results with pushed client values for network-only states; `has_errors` drift restated (S12 adds it to ADR-009). AMB-128 and AMB-129 added. |
+| 2026-11-17 | S12 test dispute: `extension-key-invalid` is an error (ADR-005 §4, #format-and-key-naming), so AMB-124 and AMB-349 rows say "error", not "warning", and `stderr_diagnostics_pass_through_display_text` expects exit 1 with the file byte-identical; `add_and_remove_preserve_members_they_do_not_set` uses the valid key `com.example.ext`; the M13 fixture `signature-defects.json` sets `contributor` equal to the `did:web:Example.com` signer (#contributor-identity "MUST exactly equal"); `dependency_direction::lambda_dependencies_are_exactly_the_allowed_set` is added by S10 with the lambda crate, not S12. |
+| 2026-11-17 | Accepted at S12 close (0.0.13): `render.rs`, `commands.rs`, `producer_commands.rs` and `dependency_direction.rs` are present and green (`cargo test --workspace`, 392 passed); both front ends render only `ResolvedCatalog`; `produce.rs` is the only `src/` that writes or renames a file; `dependency_direction` has no exemption. |
+| 2026-11-17 | M20 (ADR-003 AMB-94): the writer refuses only a number that is not a finite double, so `add_non_i_json_data_exits_2` and `no_temporary_file_remains` use `1e400`; `add_inexact_data_number_is_written_in_its_rfc_8785_form` pins that an inexact number is written in its RFC 8785 form with a `number-inexact` warning. The AMB-345 row's "values unchanged" holds for every number whose RFC 8785 form is its own value. |

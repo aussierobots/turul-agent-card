@@ -1,0 +1,29 @@
+{
+  "specVersion": "1.0",
+  "entries": [
+    {
+      "identifier": "urn:air:example.com:skill:code-review",
+      "displayName": "Code Review Assistant",
+      "type": "application/agent-skills+zip",
+      "url": "https://skills.example.com/code-review/skill.zip"
+    },
+    {
+      "identifier": "urn:air:example.com:mcp:weather",
+      "type": "application/mcp-server-card+json",
+      "url": "https://api.example.com/mcp/server-card"
+    },
+    {
+      "identifier": "urn:air:example.com:a2a:research",
+      "type": "application/a2a-agent-card+json",
+      "url": "https://agents.example.com/researchAssistant"
+    },
+    {
+      "identifier": "urn:air:example.com:agent:productivity-plugin",
+      "displayName": "Productivity Plugin",
+      "type": "application/agent-plugins+zip",
+      "description": "Tools for common productivity workflows.",
+      "tags": ["productivity", "workflows"],
+      "url": "https://plugins.example.com/productivity.zip"
+    }
+  ]
+}

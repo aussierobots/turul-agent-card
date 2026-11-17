@@ -1,0 +1,12 @@
+{"specVersion":"1.0","zz":"catalog",
+ "host":{"displayName":"H","identifier":"did:web:example.com","zz":"host"},
+ "signature":{"signer":"did:web:example.com","profile":"did-web-v1","issuedAt":"2026-03-15T10:00:00Z","jws":"eyJhbGciOiJFUzI1NiIsInR5cCI6ImFpLWNhdGFsb2crandzIn0..Y2F0YWxvZy1zaWduYXR1cmU","zz":"signature"},
+ "entries":[{"identifier":"urn:air:acme.com:agent:a","type":"application/json","url":"https://example.com/a.json","digest":"sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08","zz":"entry",
+  "extensions":{"https://ai-catalog.org/extensions/policy-urls":{"privacyPolicyUrl":"https://example.com/p","zz":"policy-urls"}},
+  "publisher":{"identifier":"did:web:acme.com","displayName":"Acme","zz":"publisher"},
+  "trustManifests":[{"contributor":"did:web:acme.com","zz":"manifest",
+   "subject":{"identifier":"urn:air:acme.com:agent:a","type":"application/json","digest":"sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08","zz":"subject"},
+   "signature":{"signer":"did:web:acme.com","profile":"did-web-v1","issuedAt":"2026-03-15T10:00:00Z","jws":"eyJhbGciOiJFUzI1NiIsImtpZCI6ImRpZDp3ZWI6YWNtZS5jb20ja2V5LTEiLCJ0eXAiOiJhaS1jYXRhbG9nLXRydXN0LW1hbmlmZXN0K2p3cyJ9..c2lnbmF0dXJlLXBsYWNlaG9sZGVy","zz":"signature"},
+   "trustSchema":{"identifier":"urn:trust:example","version":"1.0","zz":"trust-schema"},
+   "attestations":[{"type":"publisher-identity","uri":"https://example.com/p.jwt","zz":"attestation"}],
+   "provenance":[{"relation":"publishedFrom","sourceId":"https://github.com/example/repo","zz":"provenance"}]}]}]}

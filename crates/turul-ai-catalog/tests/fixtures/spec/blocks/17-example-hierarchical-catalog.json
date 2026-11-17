@@ -1,0 +1,40 @@
+{
+  "specVersion": "1.0",
+  "host": {
+    "displayName": "Acme Enterprise AI",
+    "identifier": "did:web:acme-corp.com"
+  },
+  "entries": [
+    {
+      "identifier": "urn:air:acme.com:agent:assistant",
+      "version": "3.0.0",
+      "type": "application/a2a-agent-card+json",
+      "url": "https://api.acme-corp.com/agents/assistant.json",
+      "description": "General-purpose corporate assistant agent."
+    },
+    {
+      "identifier": "urn:air:acme.com:catalog:finance",
+      "displayName": "Finance Services",
+      "type": "application/ai-catalog+json",
+      "url": "https://acme-corp.com/catalogs/finance.json",
+      "description": "Financial agents, MCP servers, and datasets.",
+      "tags": ["finance", "trading", "compliance"]
+    },
+    {
+      "identifier": "urn:air:acme.com:catalog:engineering",
+      "displayName": "Engineering Tools",
+      "type": "application/ai-catalog+json",
+      "url": "https://acme-corp.com/catalogs/engineering.json",
+      "description": "CI/CD agents, code review tools, and DevOps servers.",
+      "tags": ["engineering", "devops", "ci-cd"]
+    },
+    {
+      "identifier": "urn:air:acme.com:catalog:ml-models",
+      "displayName": "ML Models",
+      "type": "application/ai-catalog+json",
+      "url": "https://acme-corp.com/catalogs/ml-models.json",
+      "description": "Model cards and inference endpoints.",
+      "tags": ["ml", "models", "inference"]
+    }
+  ]
+}

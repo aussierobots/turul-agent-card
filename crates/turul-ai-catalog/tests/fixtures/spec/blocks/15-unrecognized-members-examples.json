@@ -1,0 +1,7 @@
+{
+  "identifier": "urn:air:example.com:weather",
+  "type": "application/mcp-server-card+json",
+  "url": "https://api.example.com/mcp/weather.json",
+  "lifecycle": "deprecated",
+  "supersededBy": "urn:air:example.com:weather-v2"
+}

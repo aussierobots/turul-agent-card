@@ -1,0 +1,20 @@
+{
+  "specVersion": "1.0",
+  "host": {
+    "displayName": "Child Host"
+  },
+  "entries": [
+    {
+      "identifier": "urn:example:agent:billing",
+      "displayName": "Billing Agent",
+      "type": "application/a2a-agent-card+json",
+      "url": "agents/billing.json",
+      "version": "1.0.0"
+    },
+    {
+      "identifier": "urn:example:catalog:root",
+      "type": "application/ai-catalog+json",
+      "url": "root.json"
+    }
+  ]
+}

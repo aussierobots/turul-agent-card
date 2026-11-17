@@ -1,0 +1,82 @@
+{
+  "empty attestations": {
+    "contributor": "did:web:a.example",
+    "attestations": []
+  },
+  "empty provenance": {
+    "contributor": "did:web:a.example",
+    "provenance": []
+  },
+  "empty extensions": {
+    "contributor": "did:web:a.example",
+    "extensions": {}
+  },
+  "empty string member": {
+    "contributor": "did:web:a.example",
+    "signature": {
+      "signer": "did:web:a.example",
+      "profile": "did-web-v1",
+      "issuedAt": "2026-03-15T10:00:00Z",
+      "jws": "",
+      "x": ""
+    }
+  },
+  "null member": {
+    "contributor": "did:web:a.example",
+    "additionalSignatures": null
+  },
+  "unknown member": {
+    "contributor": "did:web:a.example",
+    "com.example.extra": {
+      "a": 1
+    }
+  },
+  "unknown nested member": {
+    "contributor": "did:web:a.example",
+    "attestations": [
+      {
+        "type": "t",
+        "uri": "https://example.com/a",
+        "x": true
+      }
+    ]
+  },
+  "empty nested array": {
+    "contributor": "did:web:a.example",
+    "trustSchema": {
+      "identifier": "i",
+      "version": "1",
+      "verificationMethods": []
+    }
+  },
+  "whitespace and member order": {
+    "signature": {
+      "jws": "ZXlK..c2ln",
+      "profile": "did-web-v1",
+      "issuedAt": "2026-03-15T10:00:00Z",
+      "signer": "did:web:a.example"
+    },
+    "subject": {
+      "digest": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+      "type": "text/plain",
+      "identifier": "urn:air:a.example:t:a"
+    },
+    "contributor": "did:web:a.example"
+  },
+  "signed with unmodelled member": {
+    "signature": {
+      "signer": "did:web:a.example",
+      "profile": "did-web-v1",
+      "issuedAt": "2026-03-15T10:00:00Z",
+      "jws": "sig",
+      "futureMember": 7
+    },
+    "contributor": "did:web:a.example",
+    "futureMember": 42,
+    "additionalSignatures": [
+      {
+        "jws": "other"
+      }
+    ]
+  }
+}

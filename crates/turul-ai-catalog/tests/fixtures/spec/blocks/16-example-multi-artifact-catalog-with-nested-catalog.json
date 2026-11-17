@@ -1,0 +1,114 @@
+{
+  "specVersion": "1.0",
+  "host": {
+    "displayName": "Acme Services Inc.",
+    "identifier": "did:web:acme-corp.com",
+    "documentationUrl": "https://docs.acme-corp.com/ai"
+  },
+  "entries": [
+    {
+      "identifier": "urn:air:acme.com:agent:finance-a2a",
+      "version": "2.1.0",
+      "type": "application/a2a-agent-card+json",
+      "url": "https://api.acme-corp.com/agents/finance.json",
+      "description": "A2A agent for financial workflows.",
+      "tags": ["finance", "a2a"],
+      "publisher": {
+        "identifier": "did:web:acme.com",
+        "displayName": "Acme Financial Corp"
+      },
+      "updatedAt": "2026-03-15T10:00:00Z",
+      "extensions": {
+        "https://ai-catalog.org/extensions/policy-urls": {
+          "privacyPolicyUrl": "https://acme.com/legal/privacy",
+          "termsOfServiceUrl": "https://acme.com/legal/terms"
+        }
+      },
+      "trustManifests": [
+        {
+          "contributor": "did:web:acme.com",
+          "attestations": [
+            {
+              "type": "SOC2-Type2",
+              "uri": "https://trust.acme.com/reports/soc2.pdf",
+              "digest": "sha256:a1b2c3d4e5f67890abcdef1234567890abcdef1234567890abcdef1234567890"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "identifier": "urn:air:acme.com:server:finance-mcp",
+      "version": "1.4.0",
+      "type": "application/mcp-server-card+json",
+      "url": "https://api.acme-corp.com/mcp/server-card",
+      "description": "MCP server with finance tools.",
+      "tags": [
+        "finance",
+        "mcp"
+      ],
+      "updatedAt": "2026-03-15T10:00:00Z"
+    },
+    {
+      "identifier": "urn:air:acme.com:plugin:finance-suite",
+      "displayName": "Acme Finance Suite",
+      "type": "application/ai-catalog+json",
+      "description": "A2A agent + MCP server + dataset for finance workflows.",
+      "tags": [
+        "finance",
+        "suite"
+      ],
+      "data": {
+        "specVersion": "1.0",
+        "entries": [
+          {
+            "identifier": "urn:air:acme.com:agent:finance-a2a",
+            "type": "application/a2a-agent-card+json",
+            "url": "https://api.acme-corp.com/agents/finance.json"
+          },
+          {
+            "identifier": "urn:air:acme.com:server:finance-mcp",
+            "type": "application/mcp-server-card+json",
+            "url": "https://api.acme-corp.com/mcp/server-card"
+          },
+          {
+            "identifier": "urn:air:acme.com:data:market-2026q1",
+            "displayName": "Market Dataset Q1 2026",
+            "type": "application/parquet",
+            "url": "https://data.acme-corp.com/market-2026q1.parquet",
+            "trustManifests": [
+              {
+                "contributor": "did:web:acme.com",
+                "provenance": [
+                  {
+                    "relation": "publishedFrom",
+                    "sourceId": "oci://registry.acme.com/data/market:2026q1",
+                    "sourceDigest": "sha256:99998888..."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "updatedAt": "2026-03-20T14:00:00Z",
+      "digest": "sha256:22223333444455556666777788889999aaaabbbbccccddddeeeeffff00001111",
+      "trustManifests": [
+        {
+          "contributor": "did:web:acme.com",
+          "subject": {
+            "identifier": "urn:air:acme.com:plugin:finance-suite",
+            "type": "application/ai-catalog+json",
+            "digest": "sha256:22223333444455556666777788889999aaaabbbbccccddddeeeeffff00001111"
+          },
+          "signature": {
+            "signer": "did:web:acme.com",
+            "profile": "did-web-v1",
+            "issuedAt": "2026-03-20T14:00:00Z",
+            "jws": "eyJhbGciOiJFUzI1NiIsImtpZCI6ImRpZDp3ZWI6YWNtZS5jb20jcmVsZWFzZS1zaWduaW5nLWtleSIsInR5cCI6ImFpLWNhdGFsb2ctdHJ1c3QtbWFuaWZlc3QrandzIn0..detached-jws-signature"
+          }
+        }
+      ]
+    }
+  ]
+}

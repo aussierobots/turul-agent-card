@@ -1,0 +1,22 @@
+[package]
+name = "turul-ai-catalog"
+description = "Parse, validate and serialise AI Catalog (application/ai-catalog+json) documents"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+rust-version.workspace = true
+publish = true
+readme = "README.md"
+categories = ["web-programming", "parser-implementations"]
+exclude = ["tests/fixtures", "tests/readme_snippets.rs"]
+
+[dependencies]
+
+[dev-dependencies]
+sha2.workspace = true
+ai-catalog.workspace = true
+ai-catalog-validate.workspace = true
+ai-catalog-trust.workspace = true

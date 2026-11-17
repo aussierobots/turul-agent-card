@@ -1,0 +1,6 @@
+{
+  "identifier": "urn:trust:acme-enterprise-v1",
+  "version": "1.0",
+  "governanceUri": "https://acme-corp.com/trust/governance.pdf",
+  "verificationMethods": ["did", "x509"]
+}

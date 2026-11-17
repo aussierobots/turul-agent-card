@@ -1,0 +1,8 @@
+{
+  "extensions": {
+    "https://ai-catalog.org/extensions/policy-urls": {
+      "privacyPolicyUrl": "https://example.com/privacy",
+      "termsOfServiceUrl": "https://example.com/terms"
+    }
+  }
+}
