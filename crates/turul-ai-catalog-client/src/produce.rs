@@ -1,6 +1,6 @@
-//! `produce`: the one creation API for catalog files.
+//! [`produce`]: the creation API for catalog files.
 //!
-//! One fixed pipeline: start document, apply the change, `validate`, canonical bytes, atomic
+//! One fixed pipeline: start document, apply the change, [`validate`], canonical bytes, atomic
 //! write. Every refusal happens before any byte is written.
 
 use std::ffi::OsString;
@@ -20,8 +20,14 @@ use turul_ai_catalog::validate::{Report, validate};
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Change {
-    Init { host: Option<HostInput> },
+    /// Creates a new catalog file holding no entries.
+    Init {
+        /// The `host` object of the new catalog, if any.
+        host: Option<HostInput>,
+    },
+    /// Appends an entry to an existing catalog file.
     Add(EntryInput),
+    /// Removes the entry with this identifier and version from an existing catalog file.
     Remove(EntryKey),
 }
 
@@ -29,13 +35,18 @@ pub enum Change {
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct HostInput {
+    /// The `host.displayName`.
     pub display_name: String,
+    /// The `host.identifier`, such as a DID.
     pub identifier: Option<String>,
+    /// The `host.documentationUrl`.
     pub documentation_url: Option<String>,
+    /// The `host.logoUrl`.
     pub logo_url: Option<String>,
 }
 
 impl HostInput {
+    /// Builds host input with the required display name and nothing else.
     pub fn new(display_name: String) -> Self {
         Self {
             display_name,
@@ -50,16 +61,24 @@ impl HostInput {
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct EntryInput {
+    /// The entry `identifier`.
     pub identifier: String,
+    /// The entry `type`, a media type.
     pub artifact_type: String,
+    /// Where the artifact content comes from.
     pub content: Content,
+    /// The entry `displayName`.
     pub display_name: Option<String>,
+    /// The entry `description`.
     pub description: Option<String>,
+    /// The entry `version`.
     pub version: Option<String>,
+    /// The entry `tags`; none are written when empty.
     pub tags: Vec<String>,
 }
 
 impl EntryInput {
+    /// Builds entry input with the required members and no optional ones.
     pub fn new(identifier: String, artifact_type: String, content: Content) -> Self {
         Self {
             identifier,
@@ -77,16 +96,19 @@ impl EntryInput {
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Content {
+    /// A reference to the artifact, written as the entry `url`.
     Url(String),
     /// A file holding one JSON text, embedded as `data`.
     DataFile(PathBuf),
 }
 
+/// Why [`produce`] refused a change.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum ProduceError {
     /// `init` on a path that exists.
     Exists,
+    /// A file could not be read, or the catalog could not be written.
     Io(std::io::Error),
     /// The existing catalog file does not parse.
     Parse(ParseError),
@@ -98,6 +120,7 @@ pub enum ProduceError {
     NoMatch,
     /// The document the change would write has an error diagnostic.
     Invalid(Report),
+    /// The document cannot be written as canonical JSON.
     NotIJson(CanonicalError),
 }
 
@@ -121,7 +144,41 @@ impl fmt::Display for ProduceError {
 impl std::error::Error for ProduceError {}
 
 /// Applies `change` to the catalog file at `path` and writes the canonical bytes back.
-/// Returns the validation report of the written document (warnings only).
+///
+/// The write is atomic: a temporary file in the same directory is synced and renamed over
+/// `path`. Returns the [`Report`] of the written document, which holds warnings only.
+///
+/// # Errors
+///
+/// Returns [`ProduceError::Exists`] for [`Change::Init`] on an existing path,
+/// [`ProduceError::Io`] when a file cannot be read or written, [`ProduceError::Parse`] when the
+/// existing catalog does not parse, [`ProduceError::Data`] when a [`Content::DataFile`] is not
+/// JSON, [`ProduceError::Signed`] when the existing catalog carries a `signature`,
+/// [`ProduceError::NoMatch`] when [`Change::Remove`] matches no entry,
+/// [`ProduceError::Invalid`] when the result would have an error diagnostic, and
+/// [`ProduceError::NotIJson`] when it cannot be canonicalised. Nothing is written on error.
+///
+/// # Examples
+///
+/// ```
+/// use turul_ai_catalog_client::{Change, Content, EntryInput, HostInput, produce};
+///
+/// let dir = std::env::temp_dir().join(format!("ai-catalog-produce-doc-{}", std::process::id()));
+/// std::fs::create_dir_all(&dir)?;
+/// let file = dir.join("ai-catalog.json");
+/// # let _ = std::fs::remove_file(&file);
+///
+/// let host = HostInput::new("Example Corp".into());
+/// produce(&file, &Change::Init { host: Some(host) })?;
+/// let entry = EntryInput::new(
+///     "urn:air:example.com:mcp:weather".into(),
+///     "application/mcp-server-card+json".into(),
+///     Content::Url("https://mcp.example.com/.well-known/mcp/server-card.json".into()),
+/// );
+/// let report = produce(&file, &Change::Add(entry))?;
+/// assert!(!report.has_errors());
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 pub fn produce(path: &Path, change: &Change) -> Result<Report, ProduceError> {
     let mut catalog = match change {
         Change::Init { .. } => {

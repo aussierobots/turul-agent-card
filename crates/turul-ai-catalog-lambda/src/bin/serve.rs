@@ -49,14 +49,14 @@ async fn main() -> ExitCode {
             }
         };
         if let Err(e) = import(&store, &catalog, &document).await {
-            eprintln!("cannot load {path}: {e}");
+            eprintln!("cannot load {path}: {}", turul_ai_catalog::error::chain(&e));
             return ExitCode::from(1);
         }
     }
     let served: &'static ServedCatalog = match ServedCatalog::assemble(&store, &catalog).await {
         Ok(s) => Box::leak(Box::new(s)),
         Err(e) => {
-            eprintln!("{e}");
+            eprintln!("{}", turul_ai_catalog::error::chain(&e));
             return ExitCode::from(1);
         }
     };
@@ -80,7 +80,7 @@ async fn main() -> ExitCode {
     {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("server error: {e}");
+            eprintln!("server error: {}", turul_ai_catalog::error::chain(&e));
             ExitCode::from(1)
         }
     }

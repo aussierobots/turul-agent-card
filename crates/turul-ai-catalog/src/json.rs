@@ -1,4 +1,4 @@
-//! The strict RFC 8259 reader and its value type.
+//! The strict RFC 8259 reader ([`read`]) and its value type ([`Json`]).
 
 use std::fmt;
 
@@ -11,11 +11,17 @@ const MAX_DEPTH: usize = 128;
 /// A JSON value. Numbers keep their lexeme; objects reject duplicate names.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Json {
+    /// `null`.
     Null,
+    /// `true` or `false`.
     Bool(bool),
+    /// A number, kept as written.
     Number(Number),
+    /// A string, with escapes decoded.
     String(String),
+    /// An array.
     Array(Vec<Json>),
+    /// An object whose member names are unique.
     Object(Members),
 }
 
@@ -28,6 +34,7 @@ impl Number {
         Self(lexeme)
     }
 
+    /// Returns the number exactly as it was written.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -172,16 +179,19 @@ impl PartialEq for Number {
 pub struct JsonPointer(Vec<String>);
 
 impl JsonPointer {
+    /// Returns the pointer to the whole document.
     pub fn root() -> Self {
         Self::default()
     }
 
+    /// Returns the pointer to member `name` of the object this pointer names.
     pub fn child(&self, name: &str) -> Self {
         let mut t = self.0.clone();
         t.push(name.to_string());
         Self(t)
     }
 
+    /// Returns the pointer to element `i` of the array this pointer names.
     pub fn index(&self, i: usize) -> Self {
         self.child(&i.to_string())
     }
@@ -212,12 +222,35 @@ impl fmt::Display for JsonPointer {
     }
 }
 
-/// A Unicode noncharacter (RFC 7493 section 2.1): U+FDD0..U+FDEF or a code point ending FFFE or FFFF.
+/// A Unicode noncharacter (RFC 7493 section 2.1): U+FDD0..U+FDEF, or a code point ending in
+/// FFFE or FFFF.
 pub(crate) fn is_noncharacter(c: char) -> bool {
     (0xFDD0..=0xFDEF).contains(&(c as u32)) || (c as u32 & 0xFFFF) >= 0xFFFE
 }
 
-/// Reads one JSON text. The only JSON reader in the crate.
+/// Reads one JSON text; the only JSON reader in the crate.
+///
+/// Reading is strict: duplicate member names, unpaired surrogate escapes, invalid UTF-8 and
+/// nesting deeper than 128 levels are errors.
+///
+/// # Errors
+///
+/// Returns a [`ParseError`] whose kind is [`ParseErrorKind::Syntax`] for text that is not RFC 8259
+/// JSON, [`ParseErrorKind::InvalidUtf8`], [`ParseErrorKind::DepthLimit`],
+/// [`ParseErrorKind::LoneSurrogate`] or [`ParseErrorKind::DuplicateMember`], with the pointer of
+/// the offending value.
+///
+/// # Examples
+///
+/// ```
+/// use turul_ai_catalog::json::{Json, read};
+///
+/// let value = read(br#"{"a":[1,true]}"#)?;
+/// assert!(matches!(value, Json::Object(_)));
+///
+/// assert!(read(br#"{"a":1,"a":2}"#).is_err());
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 pub fn read(input: &[u8]) -> Result<Json, ParseError> {
     let mut r = Reader {
         b: input,

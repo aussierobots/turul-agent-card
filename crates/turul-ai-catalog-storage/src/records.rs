@@ -8,6 +8,7 @@ use turul_ai_catalog::validate::{Report, validate};
 
 use crate::ids::RecordKey;
 
+/// Why a record or catalog id was refused.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RecordError {
@@ -42,7 +43,7 @@ fn gate(catalog: &AiCatalog) -> Result<(), RecordError> {
     }
 }
 
-/// An entry that passed `validate` and canonical serialisation. The only way to build one is
+/// An entry that passed [`validate`] and canonical serialisation. The only way to build one is
 /// [`EntryRecord::new`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct EntryRecord {
@@ -51,6 +52,29 @@ pub struct EntryRecord {
 }
 
 impl EntryRecord {
+    /// Builds a record from `entry`, keeping its canonical JSON bytes.
+    ///
+    /// # Errors
+    ///
+    /// [`RecordError::Invalid`] when the entry has an error diagnostic;
+    /// [`RecordError::NotIJson`] when it cannot be written as canonical JSON.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use turul_ai_catalog::identity::{ArtifactType, EntryIdentifier};
+    /// use turul_ai_catalog::model::{ArtifactSource, CatalogEntry};
+    /// use turul_ai_catalog_storage::EntryRecord;
+    ///
+    /// let entry = CatalogEntry::new(
+    ///     EntryIdentifier::new("urn:air:example.com:mcp:weather"),
+    ///     ArtifactType::MCP_SERVER_CARD,
+    ///     ArtifactSource::Url("https://example.com/.well-known/mcp/server-card.json".into()),
+    /// );
+    /// let record = EntryRecord::new(entry)?;
+    /// assert!(!record.bytes().is_empty());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     pub fn new(entry: CatalogEntry) -> Result<Self, RecordError> {
         gate(&AiCatalog::new(vec![entry.clone()]))?;
         let bytes = entry
@@ -67,29 +91,37 @@ impl EntryRecord {
         Ok(Self { entry, bytes })
     }
 
+    /// Returns the entry.
     pub fn entry(&self) -> &CatalogEntry {
         &self.entry
     }
 
+    /// Consumes the record and returns the entry.
     pub fn into_entry(self) -> CatalogEntry {
         self.entry
     }
 
+    /// Returns the entry's [`EntryKey`].
     pub fn key(&self) -> EntryKey {
         self.entry.key()
     }
 
-    /// The canonical record bytes.
+    /// Returns the canonical record bytes.
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }
 
+    /// Returns the backend [`RecordKey`] of the entry.
+    ///
+    /// # Errors
+    ///
+    /// [`RecordError::NotIJson`] when the key cannot be written as canonical JSON.
     pub fn record_key(&self) -> Result<RecordKey, RecordError> {
         RecordKey::entry(&self.key())
     }
 }
 
-/// Host Info that passed `validate` and canonical serialisation.
+/// Host Info that passed [`validate`] and canonical serialisation.
 #[derive(Clone, Debug, PartialEq)]
 pub struct HostRecord {
     host: HostInfo,
@@ -97,6 +129,23 @@ pub struct HostRecord {
 }
 
 impl HostRecord {
+    /// Builds a record from `host`, keeping its canonical JSON bytes.
+    ///
+    /// # Errors
+    ///
+    /// [`RecordError::Invalid`] when the host has an error diagnostic;
+    /// [`RecordError::NotIJson`] when it cannot be written as canonical JSON.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use turul_ai_catalog::model::HostInfo;
+    /// use turul_ai_catalog_storage::HostRecord;
+    ///
+    /// let record = HostRecord::new(HostInfo::new("Example".into()))?;
+    /// assert_eq!(record.host().display_name, "Example");
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     pub fn new(host: HostInfo) -> Result<Self, RecordError> {
         let mut doc = AiCatalog::new(vec![]);
         doc.host = Some(host.clone());
@@ -113,14 +162,17 @@ impl HostRecord {
         Ok(Self { host, bytes })
     }
 
+    /// Returns the Host Info.
     pub fn host(&self) -> &HostInfo {
         &self.host
     }
 
+    /// Consumes the record and returns the Host Info.
     pub fn into_host(self) -> HostInfo {
         self.host
     }
 
+    /// Returns the canonical record bytes.
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }

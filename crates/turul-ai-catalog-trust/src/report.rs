@@ -1,7 +1,8 @@
 //! Coverage, authority, endorsement, selection among updates and the per-entry trust report
-//! (#entry-release-coverage, #the-did-web-publisher-profile, #catalog-authorization,
-//! #independent-contributions-and-updates, #verification-result). The report holds one outcome
-//! per signature and no catalog-wide verdict.
+//! ([#entry-release-coverage](https://ai-catalog.io/specification/#entry-release-coverage), [#the-did-web-publisher-profile](https://ai-catalog.io/specification/#the-did-web-publisher-profile),
+//! [#catalog-authorization](https://ai-catalog.io/specification/#catalog-authorization), [#independent-contributions-and-updates](https://ai-catalog.io/specification/#independent-contributions-and-updates),
+//! [#verification-result](https://ai-catalog.io/specification/#verification-result)). The report holds one outcome per signature and no catalog-wide
+//! verdict.
 
 use std::collections::HashMap;
 use std::time::SystemTime;
@@ -16,19 +17,22 @@ use crate::digest::{IntegrityError, verify_artifact};
 use crate::identity::{DidWebRoot, UrnAir};
 use crate::object::SignedObject;
 
-/// The DID document (or why there is none) for each signer.
+/// The DID document, or why there is none, for each signer.
 pub type DidDocuments = HashMap<DidWebRoot, Result<DidDocument, ResolveError>>;
 
 /// What one signature came to.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum SignatureOutcome<'a> {
+    /// The object has no signature.
     Unsigned,
+    /// The signature was refused.
     Rejected(Reason),
+    /// The signature passed every acceptance step.
     Accepted(AcceptedSignature<'a>),
 }
 
-/// Why an accepted manifest signature does not cover an entry release.
+/// Reports why an accepted manifest signature does not cover an entry release.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub enum CoverageGap {
@@ -36,6 +40,7 @@ pub enum CoverageGap {
     NotAManifest,
     /// The manifest `subject` is not the entry.
     SubjectMismatch,
+    /// The artifact bytes could not be shown to match `entry.digest`.
     Integrity(IntegrityError),
 }
 
@@ -43,7 +48,9 @@ pub enum CoverageGap {
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub enum Coverage {
+    /// The signature covers the entry release.
     Covered,
+    /// The signature does not cover it, for the given reason.
     Uncovered(CoverageGap),
 }
 
@@ -51,6 +58,7 @@ pub enum Coverage {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Endorsement {
+    /// Nothing may be relied on.
     None,
     /// The contributor's signature covers the entry release.
     Contributor,
@@ -58,9 +66,9 @@ pub enum Endorsement {
     Publisher,
 }
 
-/// Entry Release Coverage: an accepted manifest signature, a `subject` that binds `entry`, and
-/// artifact bytes that match `entry.digest` (`integrity`). The signer equals the contributor
-/// already, because acceptance rejects a manifest where they differ.
+/// Returns Entry Release Coverage: an accepted manifest signature, a `subject` that binds
+/// `entry`, and artifact bytes that match `entry.digest` (`integrity`). The signer equals the
+/// contributor already, because acceptance rejects a manifest where they differ.
 pub fn entry_release_coverage(
     accepted: &AcceptedSignature<'_>,
     entry: &CatalogEntry,
@@ -82,15 +90,30 @@ fn binds(manifest: &TrustManifest, entry: &CatalogEntry) -> bool {
     manifest.subject.as_ref().is_some_and(|s| s.binds(entry))
 }
 
-/// The `urn:air` publisher component, under the root `did:web` domain rule, is exactly the
-/// signer. No subdomain, suffix or ownership heuristic exists.
+/// Returns whether the `urn:air` publisher component of `identifier`, under the root `did:web`
+/// domain rule, is exactly `signer`. No subdomain, suffix or ownership heuristic applies.
+///
+/// # Examples
+///
+/// ```
+/// use turul_ai_catalog::identity::EntryIdentifier;
+/// use turul_ai_catalog_trust::{DidWebRoot, publisher_authorized};
+///
+/// let signer = DidWebRoot::parse("did:web:example.com").ok_or("not a root did:web DID")?;
+/// let id = EntryIdentifier::new("urn:air:example.com:a2a:research");
+/// assert!(publisher_authorized(&id, &signer));
+/// let other = EntryIdentifier::new("urn:air:other.example:a2a:research");
+/// assert!(!publisher_authorized(&other, &signer));
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 pub fn publisher_authorized(identifier: &EntryIdentifier, signer: &DidWebRoot) -> bool {
     UrnAir::parse(identifier.as_str())
         .and_then(|urn| DidWebRoot::parse(&format!("did:web:{}", urn.publisher())))
         .is_some_and(|publisher| &publisher == signer)
 }
 
-/// The accepted signature is a catalog's and its signer is a configured operator.
+/// Returns whether the accepted signature is a catalog's and its signer is a configured
+/// operator.
 pub fn catalog_endorsed(accepted: &AcceptedSignature<'_>, policy: &TrustPolicy) -> bool {
     matches!(accepted.object, SignedObject::Catalog(_))
         && policy.operators.contains(&accepted.signer)
@@ -100,14 +123,19 @@ pub fn catalog_endorsed(accepted: &AcceptedSignature<'_>, policy: &TrustPolicy) 
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct ManifestReport<'a> {
+    /// The manifest.
     pub manifest: &'a TrustManifest,
+    /// The outcome of its signature.
     pub signature: SignatureOutcome<'a>,
     /// Present when the signature was accepted.
     pub coverage: Option<Coverage>,
+    /// Whether the signer is the entry's `urn:air` publisher; `false` unless the signature was
+    /// accepted.
     pub publisher_authorized: bool,
 }
 
 impl ManifestReport<'_> {
+    /// Returns what the signature entitles a consumer to rely on.
     pub fn endorsement(&self) -> Endorsement {
         match (&self.signature, &self.coverage) {
             (SignatureOutcome::Accepted(_), Some(Coverage::Covered))
@@ -132,9 +160,11 @@ impl ManifestReport<'_> {
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct EntryReport<'a> {
+    /// The entry.
     pub entry: &'a CatalogEntry,
     /// Present when some accepted manifest bound to the entry, so its artifact was checked.
     pub integrity: Option<Result<(), IntegrityError>>,
+    /// One report per trust manifest of the entry.
     pub manifests: Vec<ManifestReport<'a>>,
 }
 
@@ -142,11 +172,15 @@ pub struct EntryReport<'a> {
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct CatalogReport<'a> {
+    /// The catalog document.
     pub catalog: &'a AiCatalog,
+    /// The URL the catalog was fetched from, if any.
     pub base: Option<&'a str>,
+    /// The outcome of the catalog's own signature.
     pub signature: SignatureOutcome<'a>,
     /// An accepted catalog signature by a configured operator.
     pub endorsed: bool,
+    /// One report per entry, in order.
     pub entries: Vec<EntryReport<'a>>,
 }
 
@@ -155,21 +189,24 @@ pub struct CatalogReport<'a> {
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct TrustReport<'a> {
+    /// Depth-first: the root first, then each loaded nested catalog in entry order, each
+    /// followed by its own nested catalogs.
     pub catalogs: Vec<CatalogReport<'a>>,
 }
 
-/// The chosen manifest among one contributor's endorsed manifests of an entry.
+/// The manifest chosen among one contributor's endorsed manifests of an entry.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Selection<'r, 'a> {
+    /// The one manifest with the latest `issuedAt`.
     Current(&'r ManifestReport<'a>),
     /// Two or more share the latest `issuedAt`; the choice is local policy.
     Tie(Vec<&'r ManifestReport<'a>>),
 }
 
-/// Per contributor (exact string), the manifest with the latest authenticated `issuedAt`
-/// among those endorsed. The chosen manifest is returned unchanged; array order carries no
-/// meaning.
+/// Selects, per contributor (exact string), the manifest with the latest authenticated
+/// `issuedAt` among those endorsed. The chosen manifest is returned unchanged; array order
+/// carries no meaning.
 pub fn select_current<'r, 'a>(entry: &'r EntryReport<'a>) -> Vec<(&'a str, Selection<'r, 'a>)> {
     let mut groups: Vec<(&'a str, Vec<&'r ManifestReport<'a>>)> = Vec::new();
     for m in entry
@@ -236,7 +273,7 @@ fn entry_report<'a>(
         .flatten()
         .map(|m| (m, outcome(SignedObject::Manifest(m), docs, policy, now)))
         .collect();
-    // Retrieval comes after authentication and the subject check, once per entry, and only
+    // Retrieval follows authentication and the subject check, runs once per entry, and only
     // when some accepted manifest relies on it.
     let relied_on = outcomes
         .iter()
@@ -301,9 +338,10 @@ fn catalog_reports<'a>(
     }
 }
 
-/// One outcome per signature of every catalog node of `tree`, each decided from its own
+/// Returns one outcome per signature of every catalog node of `tree`, each decided from its own
 /// signature, its own document and its own entry. A signer absent from `docs`, or whose
-/// document failed, gives `Reason::Resolve`.
+/// document failed, gives [`Reason::Resolve`]. Fetches no DID documents;
+/// artifact retrieval follows `policy.fetch`.
 pub fn verify_resolved<'a>(
     tree: &'a ResolvedCatalog,
     docs: &DidDocuments,
@@ -336,7 +374,8 @@ fn collect_signers(node: &ResolvedCatalog, policy: &TrustPolicy, out: &mut Vec<D
     }
 }
 
-/// Fetches each distinct prechecked signer's DID document once, then [`verify_resolved`].
+/// Fetches each distinct prechecked signer's DID document once, then runs
+/// [`verify_resolved`].
 ///
 /// Blocking: call through `tokio::task::spawn_blocking` from async code.
 pub fn verify<'a>(

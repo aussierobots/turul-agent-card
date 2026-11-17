@@ -1,4 +1,4 @@
-//! ES256 signing of a manifest or a catalog (#signed-payload-and-jws-construction).
+//! ES256 signing of a manifest or a catalog ([#signed-payload-and-jws-construction](https://ai-catalog.io/specification/#signed-payload-and-jws-construction)).
 
 use std::fmt;
 
@@ -14,6 +14,7 @@ use crate::payload::{PayloadError, catalog_payload, manifest_payload};
 pub struct SigningKey(Vec<u8>);
 
 impl SigningKey {
+    /// Wraps PKCS#8 DER bytes; the key is parsed when a signature is made, not here.
     pub fn from_pkcs8_der(der: &[u8]) -> Self {
         Self(der.to_vec())
     }
@@ -30,12 +31,15 @@ impl fmt::Debug for SigningKey {
 pub struct SignerParams {
     /// The root `did:web` signer; `kid` is this, `#`, and `key_fragment`.
     pub signer: DidWebRoot,
+    /// The `kid` fragment: a non-empty RFC 3986 fragment.
     pub key_fragment: String,
+    /// The signature's `issuedAt`.
     pub issued_at: String,
+    /// The signature's `expiresAt`, if any.
     pub expires_at: Option<String>,
 }
 
-/// A signing refusal.
+/// Reports why signing was refused.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SignError {
@@ -51,6 +55,7 @@ pub enum SignError {
     ContributorMismatch,
     /// The object to sign has an error diagnostic.
     Invalid(Code),
+    /// The signed payload cannot be canonicalised.
     Payload(PayloadError),
 }
 
@@ -63,12 +68,19 @@ impl fmt::Display for SignError {
             Self::SubjectMismatch => f.write_str("the manifest subject is not the entry"),
             Self::ContributorMismatch => f.write_str("contributor is not the signer"),
             Self::Invalid(code) => write!(f, "the object to sign is invalid: {code}"),
-            Self::Payload(e) => e.fmt(f),
+            Self::Payload(_) => f.write_str("the payload cannot be canonicalised"),
         }
     }
 }
 
-impl std::error::Error for SignError {}
+impl std::error::Error for SignError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Payload(e) => Some(e),
+            _ => None,
+        }
+    }
+}
 
 impl From<PayloadError> for SignError {
     fn from(e: PayloadError) -> Self {
@@ -108,6 +120,16 @@ fn jws(key: &SigningKey, typ: &str, kid: &Kid, payload: &[u8]) -> Result<String,
 }
 
 /// Signs `manifest` as the manifest of `entry`, setting its `subject` and `signature`.
+///
+/// # Errors
+///
+/// - [`SignError::Kid`] when `params.key_fragment` is not a non-empty RFC 3986 fragment.
+/// - [`SignError::DigestMissing`] when `entry` has no `digest`.
+/// - [`SignError::SubjectMismatch`] when the manifest already names a different subject.
+/// - [`SignError::ContributorMismatch`] when the manifest's `contributor` is not the signer.
+/// - [`SignError::Invalid`] when the manifest, with its signature set, has an error diagnostic.
+/// - [`SignError::Payload`] when the payload cannot be canonicalised.
+/// - [`SignError::Key`] when `key` is not an ES256 PKCS#8 key.
 pub fn sign_manifest(
     entry: &CatalogEntry,
     mut manifest: TrustManifest,
@@ -133,6 +155,38 @@ pub fn sign_manifest(
 }
 
 /// Signs `catalog` as a whole snapshot, setting its root `signature`.
+///
+/// # Errors
+///
+/// - [`SignError::Kid`] when `params.key_fragment` is not a non-empty RFC 3986 fragment.
+/// - [`SignError::Invalid`] when the catalog, with its signature set, has an error diagnostic.
+/// - [`SignError::Payload`] when the payload cannot be canonicalised.
+/// - [`SignError::Key`] when `key` is not an ES256 PKCS#8 key.
+///
+/// # Examples
+///
+/// A key that is not PKCS#8 is refused; the crate-level example signs with a real one.
+///
+/// ```
+/// use turul_ai_catalog::identity::{ArtifactType, EntryIdentifier};
+/// use turul_ai_catalog::model::{AiCatalog, ArtifactSource, CatalogEntry};
+/// use turul_ai_catalog_trust::{DidWebRoot, SignError, SignerParams, SigningKey, sign_catalog};
+///
+/// let catalog = AiCatalog::new(vec![CatalogEntry::new(
+///     EntryIdentifier::new("urn:air:example.com:a2a:research"),
+///     ArtifactType::A2A_AGENT_CARD,
+///     ArtifactSource::Url("https://agents.example.com/card.json".into()),
+/// )]);
+/// let params = SignerParams {
+///     signer: DidWebRoot::parse("did:web:example.com").ok_or("not a root did:web DID")?,
+///     key_fragment: "key-1".into(),
+///     issued_at: "2026-09-12T10:00:00Z".into(),
+///     expires_at: None,
+/// };
+/// let refused = sign_catalog(catalog, &params, &SigningKey::from_pkcs8_der(b"not a key"));
+/// assert!(matches!(refused, Err(SignError::Key)));
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 pub fn sign_catalog(
     mut catalog: AiCatalog,
     params: &SignerParams,

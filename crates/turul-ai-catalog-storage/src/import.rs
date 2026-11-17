@@ -7,17 +7,21 @@ use crate::ids::{CatalogId, Etag};
 use crate::records::{EntryRecord, HostRecord, RecordError};
 use crate::store::{CatalogStore, Condition, StoreError};
 
+/// Why [`import`] refused or failed to store a catalog document.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ImportError {
-    /// The document carries a catalog signature, which the store cannot keep valid.
+    /// The document carries a catalog `signature` or `additionalSignatures`, which the store
+    /// cannot keep valid.
     Signed,
     /// A top-level member the store cannot hold, by JSON pointer.
     Unstorable {
+        /// The JSON pointer of the member.
         pointer: String,
     },
     /// A member failed the record gate.
     Record(RecordError),
+    /// A write to the store failed.
     Store(StoreError),
 }
 
@@ -34,10 +38,40 @@ impl fmt::Display for ImportError {
 
 impl std::error::Error for ImportError {}
 
-/// The one path from a catalog document to records: refuses a signed document or one with
-/// top-level members the store cannot hold, gates the host and every entry, then writes them with
-/// `Condition::Any`. Not atomic across records; re-running converges. Returns the host's version
+/// Stores the host and every entry of `document` under `catalog`, the one path from a catalog
+/// document to records.
+///
+/// Gates the host and every entry before the first write, then writes them with
+/// [`Condition::Any`]. Not atomic across records; re-running converges. Returns the host's version
 /// (if any) followed by each entry's.
+///
+/// # Errors
+///
+/// [`ImportError::Signed`] when the document carries a `signature` or `additionalSignatures`;
+/// [`ImportError::Unstorable`] when it has top-level members the store cannot hold;
+/// [`ImportError::Record`] when the host or an entry fails the record gate;
+/// [`ImportError::Store`] when a write fails.
+///
+/// # Examples
+///
+/// ```
+/// use turul_ai_catalog::identity::{ArtifactType, EntryIdentifier};
+/// use turul_ai_catalog::model::{AiCatalog, ArtifactSource, CatalogEntry};
+/// use turul_ai_catalog_storage::{CatalogId, InMemoryCatalogStore, import};
+///
+/// # futures::executor::block_on(async {
+/// let entry = CatalogEntry::new(
+///     EntryIdentifier::new("urn:air:example.com:a2a:research"),
+///     ArtifactType::A2A_AGENT_CARD,
+///     ArtifactSource::Url("https://agents.example.com/.well-known/agent-card.json".into()),
+/// );
+/// let store = InMemoryCatalogStore::new();
+/// let etags = import(&store, &CatalogId::new("main")?, &AiCatalog::new(vec![entry])).await?;
+/// assert_eq!(etags.len(), 1);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// # })?;
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 pub async fn import(
     store: &dyn CatalogStore,
     catalog: &CatalogId,

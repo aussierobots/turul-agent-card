@@ -19,12 +19,33 @@ struct Records {
 }
 
 /// The default backend: records in a process-local map, every write under one lock.
+///
+/// # Examples
+///
+/// ```
+/// use turul_ai_catalog::model::HostInfo;
+/// use turul_ai_catalog_storage::{
+///     CatalogId, CatalogStore, Condition, HostRecord, InMemoryCatalogStore,
+/// };
+///
+/// # futures::executor::block_on(async {
+/// let store = InMemoryCatalogStore::new();
+/// let catalog = CatalogId::new("main")?;
+/// let host = HostRecord::new(HostInfo::new("Example".into()))?;
+/// let etag = store.put_host(&catalog, &host, Condition::Absent).await?;
+/// let stored = store.get_host(&catalog).await?.ok_or("host missing")?;
+/// assert_eq!(stored.etag, etag);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// # })?;
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 #[derive(Default)]
 pub struct InMemoryCatalogStore {
     records: RwLock<Records>,
 }
 
 impl InMemoryCatalogStore {
+    /// Creates an empty store.
     pub fn new() -> Self {
         Self::default()
     }

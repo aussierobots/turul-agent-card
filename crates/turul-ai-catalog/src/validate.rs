@@ -1,4 +1,7 @@
 //! The one document validator: content rules the CDDL cannot express.
+//!
+//! [`validate`] checks a catalog and [`validate_manifest`] a standalone Trust Manifest; both
+//! return a [`Report`] of [`Diagnostic`]s rather than stopping at the first.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -13,18 +16,22 @@ use crate::parse;
 use crate::timestamp::Timestamp;
 use crate::uri;
 
-/// The deepest nesting of catalogs this crate validates; the root is level 1. #nested-catalog-entries
-/// says clients SHOULD impose a limit and that 4 is RECOMMENDED; deeper nesting is not validated.
+/// The deepest nesting of catalogs this crate validates; the root is level 1.
+///
+/// [#nested-catalog-entries](https://ai-catalog.io/specification/#nested-catalog-entries) says clients SHOULD impose a limit and that 4 is RECOMMENDED;
+/// deeper nesting is not validated.
 pub const MAX_NESTING_DEPTH: u8 = 4;
 
 /// The level of a catalog in a tree of nested catalogs: the root is 1 and the limit is
-/// [`MAX_NESTING_DEPTH`] (4, the RECOMMENDED limit of #nested-catalog-entries).
+/// [`MAX_NESTING_DEPTH`] (4, the RECOMMENDED limit of [#nested-catalog-entries](https://ai-catalog.io/specification/#nested-catalog-entries)).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NestingDepth(u8);
 
 impl NestingDepth {
+    /// The depth of a catalog that is not nested in another.
     pub const ROOT: Self = Self(1);
 
+    /// Returns the depth as a number, the root being 1.
     pub fn get(self) -> u8 {
         self.0
     }
@@ -35,46 +42,81 @@ impl NestingDepth {
     }
 }
 
+/// How serious a [`Diagnostic`] is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Severity {
+    /// A defect that leaves the document [`Conformance::NotMet`].
     Error,
+    /// A finding that does not by itself affect conformance, such as a SHOULD not met or
+    /// content this crate cannot check.
     Warning,
 }
 
+/// The rule a [`Diagnostic`] reports. [`Code::as_str`] gives its stable kebab-case name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Code {
+    /// `specVersion` has a part with a leading zero.
     SpecVersionNoncanonical,
+    /// An entry `identifier` is empty.
     IdentifierEmpty,
+    /// An entry `type` is empty.
     TypeEmpty,
+    /// An entry `url` is empty.
     UrlEmpty,
+    /// Two entries share an identifier and `version`, or an identifier and both lack `version`.
     EntryDuplicate,
+    /// An entry has no `version` while another entry with its identifier has one.
     VersionMissingInGroup,
+    /// A timestamp is not an RFC 3339 `date-time`.
     TimestampInvalid,
+    /// A digest is not `algorithm:lowercase-hex` of the algorithm's length.
     DigestInvalid,
+    /// A digest output is shorter than SHA-256.
     DigestWeak,
+    /// A digest names an algorithm this crate cannot compute.
     DigestAlgorithmUnknown,
+    /// An extension key is neither a URL with an authority nor a reverse-DNS name.
     ExtensionKeyInvalid,
+    /// The policy-urls extension is not an object, or its `privacyPolicyUrl` or
+    /// `termsOfServiceUrl` is not a string.
     PolicyUrlsInvalid,
+    /// The host `logoUrl` is not a `data:` URI.
     LogoUrlNotDataUri,
+    /// A nested catalog entry's `data` does not parse as a catalog.
     NestedCatalogInvalid,
+    /// A nested catalog lies deeper than [`MAX_NESTING_DEPTH`] and was not validated.
     NestedDepthLimit,
+    /// A number has no finite double value, so it cannot be canonicalised.
     NumberNotIJson,
+    /// A number has more precision than a double and would change when canonicalised.
     NumberInexact,
+    /// A string or member name holds a Unicode noncharacter.
     StringNotIJson,
+    /// A manifest `contributor` is not an absolute URI.
     ContributorNotAbsoluteUri,
+    /// A manifest carries nothing beyond `contributor` and `subject`.
     ManifestNotSubstantive,
+    /// A signed manifest has no `subject`.
     ManifestSubjectMissing,
+    /// A manifest signature's `signer` differs from the manifest `contributor`.
     SignerContributorMismatch,
+    /// A signature `signer` is not an absolute URI.
     SignerNotAbsoluteUri,
+    /// A signature `profile` is empty.
     ProfileEmpty,
+    /// A signature `profile` is neither reserved nor an absolute URI.
     ProfileUnrecognised,
+    /// A signature `expiresAt` is not after its `issuedAt`.
     SignatureExpiryOrder,
+    /// A manifest `subject` member differs from the entry it sits in.
     SubjectMismatch,
+    /// An entry has a signed manifest but no `digest`.
     EntryDigestMissing,
 }
 
 impl Code {
+    /// Returns the stable kebab-case name of the rule, such as `"digest-weak"`.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::SpecVersionNoncanonical => "spec-version-noncanonical",
@@ -115,33 +157,43 @@ impl fmt::Display for Code {
     }
 }
 
+/// One finding of [`validate`] or [`validate_manifest`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Diagnostic {
+    /// Whether the finding is an error or a warning.
     pub severity: Severity,
+    /// The rule that was broken.
     pub code: Code,
     /// RFC 6901 pointer of the offending value in the validated document.
     pub path: JsonPointer,
 }
 
-/// The conformance level a document meets (never the implementation's level).
+/// The conformance level a document meets (never the implementation's level;
+/// [#conformance-levels](https://ai-catalog.io/specification/#conformance-levels)).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 #[non_exhaustive]
 pub enum ConformanceLevel {
+    /// Level 1, [#level-1-minimal-catalog](https://ai-catalog.io/specification/#level-1-minimal-catalog): a valid catalog.
     Minimal,
+    /// Level 2, [#level-2-discoverable-catalog](https://ai-catalog.io/specification/#level-2-discoverable-catalog): a valid catalog that has Host Info.
     Discoverable,
 }
 
+/// The outcome of judging a document against the [`ConformanceLevel`]s.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Conformance {
     /// No level is judged: the report is of a standalone manifest.
     None,
+    /// The document has no errors and meets this level.
     Met(ConformanceLevel),
+    /// The document has at least one error.
     NotMet,
     /// Content was left unvalidated at the nesting limit.
     Undetermined,
 }
 
+/// The findings of validating a document and the conformance level they leave it at.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Report {
     diagnostics: Vec<Diagnostic>,
@@ -149,14 +201,17 @@ pub struct Report {
 }
 
 impl Report {
+    /// Returns every finding, errors and warnings.
     pub fn diagnostics(&self) -> &[Diagnostic] {
         &self.diagnostics
     }
 
+    /// Returns the conformance level the document meets.
     pub fn conformance(&self) -> Conformance {
         self.conformance
     }
 
+    /// Returns whether any finding is an [`Severity::Error`].
     pub fn has_errors(&self) -> bool {
         self.diagnostics
             .iter()
@@ -164,14 +219,28 @@ impl Report {
     }
 }
 
-/// The profile identifier the did:web publisher profile reserves (#profile-selection).
+/// The profile identifier the did:web publisher profile reserves ([#profile-selection](https://ai-catalog.io/specification/#profile-selection)).
 pub const DID_WEB_V1: &str = "did-web-v1";
 
 /// The profile identifiers matched exactly; any other must be an absolute URI.
 pub const RESERVED_PROFILES: [&str; 1] = [DID_WEB_V1];
 
-/// The one owner of manifest-scope and signature-scope diagnostics. Pointers are
-/// relative to the manifest; entry-scope binding needs the entry, so only [`validate`] reports it.
+/// Validates a standalone Trust Manifest: the one owner of manifest-scope and signature-scope
+/// diagnostics.
+///
+/// Pointers are relative to the manifest. Binding the subject to an entry needs the entry, so
+/// only [`validate`] reports it; the report's conformance is [`Conformance::None`].
+///
+/// # Examples
+///
+/// ```
+/// use turul_ai_catalog::model::TrustManifest;
+/// use turul_ai_catalog::validate::{Code, validate_manifest};
+///
+/// // A manifest with only a contributor carries no claim.
+/// let report = validate_manifest(&TrustManifest::new("https://example.com/contributor".into()));
+/// assert!(report.diagnostics().iter().any(|d| d.code == Code::ManifestNotSubstantive));
+/// ```
 pub fn validate_manifest(manifest: &TrustManifest) -> Report {
     let mut diagnostics = Vec::new();
     check_manifest(manifest, &JsonPointer::root(), &mut diagnostics);
@@ -192,11 +261,33 @@ pub fn validate_manifest(manifest: &TrustManifest) -> Report {
     }
 }
 
+/// Validates a catalog against the content rules the schema cannot express.
+///
+/// Reports every finding with its JSON Pointer, including those of nested catalogs up to
+/// [`MAX_NESTING_DEPTH`]. A catalog with no errors meets the Minimal level, or the Discoverable
+/// level when it has Host Info; its conformance is [`Conformance::Undetermined`] instead when a
+/// nested catalog lies beyond the nesting limit.
+///
+/// # Examples
+///
+/// ```
+/// use turul_ai_catalog::parse::parse;
+/// use turul_ai_catalog::validate::{Conformance, ConformanceLevel, validate};
+///
+/// let catalog = parse(br#"{"specVersion":"1.0","entries":[
+///   {"identifier":"urn:air:example.com:mcp:weather","type":"application/mcp-server-card+json",
+///    "url":"https://mcp.example.com/.well-known/mcp/server-card.json"}]}"#)?;
+/// let report = validate(&catalog);
+/// assert!(!report.has_errors());
+/// assert_eq!(report.conformance(), Conformance::Met(ConformanceLevel::Minimal));
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 pub fn validate(catalog: &AiCatalog) -> Report {
     validate_at(catalog, NestingDepth::ROOT)
 }
 
-/// Validates one document that sits at `depth`.
+/// Validates a catalog that sits at `depth` in a tree of nested catalogs, as [`validate`] does
+/// for a root catalog.
 pub fn validate_at(catalog: &AiCatalog, depth: NestingDepth) -> Report {
     let mut diagnostics = Vec::new();
     check(catalog, depth, true, &mut diagnostics);

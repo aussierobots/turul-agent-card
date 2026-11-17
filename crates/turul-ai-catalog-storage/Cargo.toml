@@ -7,8 +7,15 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 keywords.workspace = true
+categories = ["web-programming", "database"]
+readme = "README.md"
+documentation = "https://docs.rs/turul-ai-catalog-storage"
 rust-version.workspace = true
 publish = true
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
 default = ["in-memory"]

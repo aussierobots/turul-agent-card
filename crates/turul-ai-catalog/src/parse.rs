@@ -1,4 +1,6 @@
-//! Bytes to model: version gate, then CDDL shape mapping.
+//! Bytes to model: the `specVersion` gate, then the mapping of the CDDL shape ([#cddl-schema](https://ai-catalog.io/specification/#cddl-schema)).
+//!
+//! Parsing stops at the first defect and reports it with the JSON Pointer of the offending value.
 
 use std::fmt;
 
@@ -7,26 +9,44 @@ use crate::json::{self, Json, JsonPointer};
 use crate::model::*;
 use crate::names::*;
 
+/// Why bytes could not be read as an AI Catalog, and where.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ParseError {
+    /// What is wrong.
     pub kind: ParseErrorKind,
+    /// Location of the offending value in the input document.
     pub pointer: JsonPointer,
 }
 
+/// What is wrong with the input of [`parse`], [`parse_entry`] or [`parse_host`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ParseErrorKind {
+    /// The input is not RFC 8259 JSON.
     Syntax,
+    /// A string is not valid UTF-8.
     InvalidUtf8,
+    /// Arrays and objects nest more than 128 levels deep.
     DepthLimit,
+    /// A `\u` escape is an unpaired surrogate.
     LoneSurrogate,
+    /// An object repeats a member name.
     DuplicateMember,
+    /// `specVersion` is missing, not a string, or not `<major>.<minor>`.
     SpecVersionInvalid,
-    UnsupportedMajor { found: String },
+    /// `specVersion` names a major version other than the supported one.
+    UnsupportedMajor {
+        /// The `specVersion` as written.
+        found: String,
+    },
+    /// A required member is absent.
     MissingMember,
+    /// A value has the wrong JSON type.
     WrongType,
+    /// An entry has both `url` and `data`.
     ArtifactSourceConflict,
+    /// An entry has neither `url` nor `data`.
     ArtifactSourceMissing,
 }
 
@@ -72,16 +92,82 @@ fn fail<T>(kind: ParseErrorKind, p: &JsonPointer) -> Result<T, ParseError> {
 }
 
 /// Parses an AI Catalog document.
+///
+/// Reading is strict: duplicate member names, missing required members, wrong member types and
+/// an unsupported major `specVersion` are errors. Content rules beyond the schema are reported
+/// by [`validate`](crate::validate::validate).
+///
+/// # Errors
+///
+/// Returns a [`ParseError`] whose [`kind`](ParseError::kind) is one of the JSON reading errors
+/// ([`Syntax`](ParseErrorKind::Syntax), [`InvalidUtf8`](ParseErrorKind::InvalidUtf8),
+/// [`DepthLimit`](ParseErrorKind::DepthLimit), [`LoneSurrogate`](ParseErrorKind::LoneSurrogate),
+/// [`DuplicateMember`](ParseErrorKind::DuplicateMember)), or:
+///
+/// - [`SpecVersionInvalid`](ParseErrorKind::SpecVersionInvalid) when `specVersion` is missing or
+///   not `<major>.<minor>`;
+/// - [`UnsupportedMajor`](ParseErrorKind::UnsupportedMajor) when its major version is not 1;
+/// - [`MissingMember`](ParseErrorKind::MissingMember) or [`WrongType`](ParseErrorKind::WrongType)
+///   for a required member that is absent or of the wrong JSON type;
+/// - [`ArtifactSourceConflict`](ParseErrorKind::ArtifactSourceConflict) or
+///   [`ArtifactSourceMissing`](ParseErrorKind::ArtifactSourceMissing) for an entry that does not
+///   have exactly one of `url` and `data`.
+///
+/// # Examples
+///
+/// ```
+/// use turul_ai_catalog::parse::{ParseErrorKind, parse};
+///
+/// let catalog = parse(br#"{"specVersion":"1.0","entries":[]}"#)?;
+/// assert!(catalog.entries.is_empty());
+///
+/// let err = parse(br#"{"specVersion":"1.0"}"#).unwrap_err();
+/// assert_eq!(err.kind, ParseErrorKind::MissingMember);
+/// assert_eq!(err.pointer.to_string(), "/entries");
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 pub fn parse(input: &[u8]) -> Result<AiCatalog, ParseError> {
     catalog(&json::read(input)?, &JsonPointer::root())
 }
 
-/// Parses one catalog entry: the same member reader `parse` applies to `entries[i]`.
+/// Parses one catalog entry: the same member reader [`parse`] applies to `entries[i]`.
+///
+/// # Errors
+///
+/// Returns a [`ParseError`] for malformed JSON, a missing or mistyped member, or an entry that
+/// does not have exactly one of `url` and `data`; see [`parse`] for the kinds.
+///
+/// # Examples
+///
+/// ```
+/// use turul_ai_catalog::parse::parse_entry;
+///
+/// let entry = parse_entry(br#"{"identifier":"urn:air:example.com:mcp:weather",
+///   "type":"application/mcp-server-card+json",
+///   "url":"https://mcp.example.com/.well-known/mcp/server-card.json"}"#)?;
+/// assert_eq!(entry.identifier.as_str(), "urn:air:example.com:mcp:weather");
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 pub fn parse_entry(input: &[u8]) -> Result<CatalogEntry, ParseError> {
     entry(&json::read(input)?, &JsonPointer::root())
 }
 
-/// Parses Host Info: the same member reader `parse` applies to `host`.
+/// Parses Host Info: the same member reader [`parse`] applies to `host`.
+///
+/// # Errors
+///
+/// Returns a [`ParseError`] for malformed JSON or a missing or mistyped member; see [`parse`]
+/// for the kinds.
+///
+/// # Examples
+///
+/// ```
+/// use turul_ai_catalog::parse::parse_host;
+///
+/// let host = parse_host(br#"{"displayName":"Example Corp","identifier":"did:web:example.com"}"#)?;
+/// assert_eq!(host.display_name, "Example Corp");
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 pub fn parse_host(input: &[u8]) -> Result<HostInfo, ParseError> {
     host(&json::read(input)?, &JsonPointer::root())
 }
@@ -93,7 +179,8 @@ pub(crate) fn catalog(v: &Json, p: &JsonPointer) -> Result<AiCatalog, ParseError
     document(v, p)
 }
 
-/// #consumer-behavior: the version is parsed before any other member is mapped.
+/// The version is parsed before any other member is mapped
+/// ([#consumer-behavior](https://ai-catalog.io/specification/#consumer-behavior)).
 fn gate(root: &Json, p: &JsonPointer) -> Result<(), ParseError> {
     let Json::Object(m) = root else {
         return fail(ParseErrorKind::WrongType, p);

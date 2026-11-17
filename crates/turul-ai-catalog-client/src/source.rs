@@ -1,4 +1,4 @@
-//! Catalog sources and the one well-known URL constructor.
+//! Catalog sources and the well-known URL constructor.
 
 use std::fmt;
 use std::path::PathBuf;
@@ -6,16 +6,20 @@ use std::path::PathBuf;
 use turul_ai_catalog::identity::WELL_KNOWN_PATH;
 use url::Url;
 
+/// Where [`load`](crate::load) reads a root catalog from.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Source {
+    /// A local catalog file.
     File(PathBuf),
+    /// A catalog at an explicit URL.
     Url(String),
+    /// The catalog at a host's well-known path.
     WellKnown(WellKnownHost),
 }
 
 impl Source {
-    /// The URL a request for this source goes to; `None` for a file.
+    /// Returns the URL a request for this source goes to, or `None` for a file.
     pub fn request_url(&self) -> Option<String> {
         match self {
             Source::File(_) => None,
@@ -25,12 +29,14 @@ impl Source {
     }
 }
 
-/// A host with an optional port and nothing else.
+/// A host with an optional port and nothing else, resolved to its
+/// [`/.well-known/ai-catalog.json`](https://ai-catalog.io/specification/#well-known-uri) URL.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WellKnownHost {
     url: String,
 }
 
+/// The text given to [`WellKnownHost::new`] is not a host with an optional port.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct InvalidHost;
 
@@ -43,6 +49,25 @@ impl fmt::Display for InvalidHost {
 impl std::error::Error for InvalidHost {}
 
 impl WellKnownHost {
+    /// Builds the well-known URL of `host`, an optional-port host such as `example.com:8443`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidHost`] when `host` carries a scheme, credentials, path, query or
+    /// fragment, or is not a valid host.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use turul_ai_catalog_client::{Source, WellKnownHost};
+    ///
+    /// let source = Source::WellKnown(WellKnownHost::new("example.com")?);
+    /// assert_eq!(
+    ///     source.request_url().as_deref(),
+    ///     Some("https://example.com/.well-known/ai-catalog.json"),
+    /// );
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     pub fn new(host: &str) -> Result<Self, InvalidHost> {
         let u = Url::parse(&format!("https://{host}{WELL_KNOWN_PATH}")).map_err(|_| InvalidHost)?;
         let plain = u.host_str().is_some()

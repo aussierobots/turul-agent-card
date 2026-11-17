@@ -1,4 +1,4 @@
-//! The bytes a detached JWS covers (#signed-payload-and-jws-construction, #catalog-snapshot-coverage).
+//! The bytes a detached JWS covers ([#signed-payload-and-jws-construction](https://ai-catalog.io/specification/#signed-payload-and-jws-construction), [#catalog-snapshot-coverage](https://ai-catalog.io/specification/#catalog-snapshot-coverage)).
 
 use std::fmt;
 
@@ -6,12 +6,15 @@ use turul_ai_catalog::canonical::CanonicalError;
 use turul_ai_catalog::json::{Json, JsonPointer};
 use turul_ai_catalog::model::{AiCatalog, Members, TrustManifest};
 
-/// A payload that cannot be canonicalised.
+/// Reports why a payload cannot be canonicalised.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PayloadError {
-    /// A number or string that is not I-JSON, located relative to the signed object.
-    NotIJson { pointer: JsonPointer },
+    /// A number or string is not I-JSON.
+    NotIJson {
+        /// Location of the offending value, relative to the signed object.
+        pointer: JsonPointer,
+    },
 }
 
 impl fmt::Display for PayloadError {
@@ -28,19 +31,45 @@ impl From<CanonicalError> for PayloadError {
     fn from(e: CanonicalError) -> Self {
         match e {
             CanonicalError::NotIJson { pointer } => Self::NotIJson { pointer },
-            // `CanonicalError` is `#[non_exhaustive]`; `NotIJson` is its only refusal today.
+            // `CanonicalError` is `#[non_exhaustive]`; `NotIJson` is its only refusal.
             _ => unreachable!("CanonicalError has one variant"),
         }
     }
 }
 
-/// JCS bytes of the manifest without its immediate `signature.jws` and `additionalSignatures`.
+/// Returns the RFC 8785 (JCS) bytes of the manifest without its immediate `signature.jws` and
+/// `additionalSignatures`.
+///
+/// # Errors
+///
+/// [`PayloadError::NotIJson`] when a number or string in the manifest is not I-JSON.
 pub fn manifest_payload(manifest: &TrustManifest) -> Result<Vec<u8>, PayloadError> {
     payload_of(manifest.to_json())
 }
 
-/// JCS bytes of the whole catalog snapshot without its immediate `signature.jws` and
-/// `additionalSignatures`; nested manifests and their signatures stay.
+/// Returns the RFC 8785 (JCS) bytes of the whole catalog snapshot without its immediate
+/// `signature.jws` and `additionalSignatures`; nested manifests and their signatures stay.
+///
+/// # Errors
+///
+/// [`PayloadError::NotIJson`] when a number or string in the catalog is not I-JSON.
+///
+/// # Examples
+///
+/// ```
+/// use turul_ai_catalog::identity::{ArtifactType, EntryIdentifier};
+/// use turul_ai_catalog::model::{AiCatalog, ArtifactSource, CatalogEntry};
+/// use turul_ai_catalog_trust::catalog_payload;
+///
+/// let catalog = AiCatalog::new(vec![CatalogEntry::new(
+///     EntryIdentifier::new("urn:air:example.com:a2a:research"),
+///     ArtifactType::A2A_AGENT_CARD,
+///     ArtifactSource::Url("https://agents.example.com/card.json".into()),
+/// )]);
+/// let bytes = catalog_payload(&catalog)?;
+/// assert!(bytes.starts_with(br#"{"entries":"#));
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 pub fn catalog_payload(catalog: &AiCatalog) -> Result<Vec<u8>, PayloadError> {
     payload_of(catalog.to_json())
 }

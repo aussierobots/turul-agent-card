@@ -9,6 +9,12 @@ repository.workspace = true
 keywords.workspace = true
 rust-version.workspace = true
 publish = true
+readme = "README.md"
+documentation = "https://docs.rs/turul-ai-catalog-lambda"
+categories = ["web-programming", "network-programming"]
+
+[package.metadata.docs.rs]
+all-features = true
 
 [[bin]]
 name = "turul-ai-catalog-lambda"

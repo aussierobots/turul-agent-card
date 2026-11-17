@@ -1,4 +1,4 @@
-//! Artifact digests and integrity (#digest-format, #verifying-artifact-integrity).
+//! Artifact digests and integrity ([#digest-format](https://ai-catalog.io/specification/#digest-format), [#verifying-artifact-integrity](https://ai-catalog.io/specification/#verifying-artifact-integrity)).
 
 use std::fmt;
 
@@ -9,34 +9,42 @@ use turul_ai_catalog::json::JsonPointer;
 use turul_ai_catalog::model::{ArtifactSource, CatalogEntry};
 use turul_ai_catalog_client::{FetchError, FetchPolicy, fetch, resolve_reference};
 
-/// What this crate cannot do.
+/// A digest or artifact form this crate does not support.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Unsupported {
-    /// A hash algorithm other than sha256, sha384 and sha512.
+    /// A hash algorithm other than sha256, sha384 and sha512; carries its lowercase name.
     Algorithm(String),
     /// An artifact `url` with the `data` scheme; inline content belongs in `data`.
     DataUri,
 }
 
-/// Why an artifact's integrity could not be established.
+/// Reports why an artifact's integrity could not be established.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub enum IntegrityError {
+    /// The entry has no `digest`.
     DigestMissing,
+    /// The entry's `digest` is malformed or weaker than SHA-256.
     DigestInvalid,
+    /// The digest algorithm or artifact form is not supported.
     Unsupported(Unsupported),
     /// A relative `url` without a base.
     Unresolvable,
+    /// Retrieving the artifact failed.
     Fetch(FetchError),
     /// The artifact response status was not 200.
     Status(u16),
     /// Inline `data` that JCS cannot canonicalise.
     NotIJson {
+        /// Location of the offending value within `data`.
         pointer: JsonPointer,
     },
+    /// The artifact bytes do not hash to the entry's digest.
     Mismatch {
+        /// The entry's digest, algorithm lowercased.
         expected: String,
+        /// The digest computed from the artifact bytes.
         actual: String,
     },
 }
@@ -51,7 +59,7 @@ impl fmt::Display for IntegrityError {
             }
             Self::Unsupported(Unsupported::DataUri) => f.write_str("data: URLs are not supported"),
             Self::Unresolvable => f.write_str("relative url without a base"),
-            Self::Fetch(e) => write!(f, "artifact fetch failed: {e}"),
+            Self::Fetch(_) => f.write_str("artifact fetch failed"),
             Self::Status(s) => write!(f, "artifact response status {s}"),
             Self::NotIJson { pointer } => write!(f, "inline data is not I-JSON at {pointer}"),
             Self::Mismatch { expected, actual } => {
@@ -70,8 +78,25 @@ impl std::error::Error for IntegrityError {
     }
 }
 
-/// `<lowercase algorithm>:<lowercase hex>` of `bytes`; `algorithm` is matched ASCII
-/// case-insensitively against sha256, sha384 and sha512.
+/// Returns the digest of `bytes` as `<lowercase algorithm>:<lowercase hex>`; `algorithm` is
+/// matched ASCII case-insensitively against sha256, sha384 and sha512.
+///
+/// # Errors
+///
+/// [`IntegrityError::Unsupported`] with [`Unsupported::Algorithm`] for any other algorithm.
+///
+/// # Examples
+///
+/// ```
+/// use turul_ai_catalog_trust::compute;
+///
+/// let digest = compute("SHA256", b"abc")?;
+/// assert_eq!(
+///     digest,
+///     "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+/// );
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 pub fn compute(algorithm: &str, bytes: &[u8]) -> Result<String, IntegrityError> {
     let name = algorithm.to_ascii_lowercase();
     let raw: Vec<u8> = match name.as_str() {
@@ -90,6 +115,37 @@ pub fn compute(algorithm: &str, bytes: &[u8]) -> Result<String, IntegrityError> 
 ///
 /// Blocking: a `url` entry performs an HTTP request. Call through
 /// `tokio::task::spawn_blocking` from async code.
+///
+/// # Errors
+///
+/// - [`IntegrityError::DigestMissing`] or [`IntegrityError::DigestInvalid`] when the entry's
+///   digest is absent, or malformed or weaker than SHA-256.
+/// - [`IntegrityError::NotIJson`] when inline `data` cannot be canonicalised.
+/// - [`IntegrityError::Unresolvable`] for a relative `url` without a `base`.
+/// - [`IntegrityError::Unsupported`] for an unknown algorithm or a `data:` URL.
+/// - [`IntegrityError::Fetch`] or [`IntegrityError::Status`] when retrieval fails or the
+///   response status is not 200.
+/// - [`IntegrityError::Mismatch`] when the bytes do not hash to the digest.
+///
+/// # Examples
+///
+/// ```
+/// use turul_ai_catalog::identity::{ArtifactType, EntryIdentifier};
+/// use turul_ai_catalog::json::read;
+/// use turul_ai_catalog::model::{ArtifactSource, CatalogEntry};
+/// use turul_ai_catalog_client::FetchPolicy;
+/// use turul_ai_catalog_trust::{compute, verify_artifact};
+///
+/// let data = read(br#"{"name":"research"}"#)?;
+/// let mut entry = CatalogEntry::new(
+///     EntryIdentifier::new("urn:air:example.com:a2a:research"),
+///     ArtifactType::A2A_AGENT_CARD,
+///     ArtifactSource::Data(data),
+/// );
+/// entry.digest = Some(compute("sha256", br#"{"name":"research"}"#)?);
+/// verify_artifact(&entry, None, &FetchPolicy::default())?;
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 pub fn verify_artifact(
     entry: &CatalogEntry,
     base: Option<&str>,

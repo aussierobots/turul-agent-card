@@ -5,6 +5,22 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.0.19] - 2026-11-17
+
+### Added
+
+- `turul_ai_catalog::error::chain`: renders an error followed by its `source()` chain in one line. The CLI, the local server and the Lambda's refresh log use it.
+- `Display` and `std::error::Error` for `DigestError`, `PolicyUrlsError` and `TimestampError`.
+- API documentation for every public item in every crate: summaries, `# Errors` sections, offline examples, and spec links. `missing_docs` is enforced. On docs.rs, the storage crate documents all backends and marks the feature that enables each one.
+
+### Changed
+
+- Error `Display` messages follow the Rust API Guidelines: each states only its own failure, and the cause is returned by `source()` (trust, tui and client errors). Callers that printed `to_string()` and relied on the cause being included should use `error::chain`.
+
+### Verification
+
+- fmt, clippy `-D warnings` with all features, all tests and doctests, the DynamoDB Local and PostgreSQL parity suites, `cargo doc -D warnings`, and the docs.rs nightly build pass.
+
 ## [0.0.18] - 2026-11-17
 
 ### Added

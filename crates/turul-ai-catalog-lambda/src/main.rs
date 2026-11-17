@@ -1,3 +1,5 @@
+//! The Lambda function: serves the catalog assembled from the configured store.
+
 use std::sync::Arc;
 
 use lambda_http::{Error, run, service_fn};
@@ -39,7 +41,10 @@ async fn main() -> Result<(), Error> {
     run(service_fn(move |request| async move {
         let (served, refresh_error) = cache.current(&**store, catalog).await;
         if let Some(e) = refresh_error {
-            eprintln!("catalog refresh failed, serving the last good snapshot: {e}");
+            eprintln!(
+                "catalog refresh failed, serving the last good snapshot: {}",
+                turul_ai_catalog::error::chain(&e)
+            );
         }
         Ok::<_, Error>(handle(&served, &request))
     }))

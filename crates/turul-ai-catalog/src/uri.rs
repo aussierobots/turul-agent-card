@@ -35,8 +35,18 @@ fn chars_ok(s: &str, allowed: &[u8]) -> bool {
     true
 }
 
-/// RFC 3986 `fragment` (`*( pchar / "/" / "?" )`, section 3.5): empty is allowed here; the caller
-/// decides whether it may be.
+/// Returns whether `s` is an RFC 3986 `fragment` (`*( pchar / "/" / "?" )`, section 3.5).
+///
+/// The empty string is a fragment here; the caller decides whether it may be.
+///
+/// # Examples
+///
+/// ```
+/// use turul_ai_catalog::uri::is_fragment;
+///
+/// assert!(is_fragment("section-1/a%20b"));
+/// assert!(!is_fragment("has space"));
+/// ```
 pub fn is_fragment(s: &str) -> bool {
     chars_ok(s, b":@/?")
 }

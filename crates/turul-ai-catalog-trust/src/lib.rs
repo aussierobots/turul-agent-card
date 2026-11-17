@@ -1,5 +1,5 @@
-//! Trust for AI Catalogs: the signed payload of a manifest or catalog, artifact digests, signing
-//! and the checks on a signature's protected header and signer.
+#![doc = include_str!("../README.md")]
+#![warn(missing_docs)]
 
 pub mod accept;
 pub mod did_web;

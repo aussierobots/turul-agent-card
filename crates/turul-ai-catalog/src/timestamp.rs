@@ -1,4 +1,4 @@
-//! The one RFC 3339 instant (#catalog-entry `updatedAt`).
+//! The one RFC 3339 instant ([#catalog-entry](https://ai-catalog.io/specification/#catalog-entry) `updatedAt`).
 
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -13,6 +13,14 @@ pub struct Timestamp {
 /// The text is not an RFC 3339 section 5.6 `date-time`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TimestampError;
+
+impl fmt::Display for TimestampError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("not an RFC 3339 date-time")
+    }
+}
+
+impl std::error::Error for TimestampError {}
 
 /// Days from 1970-01-01 to a proleptic Gregorian date (Hinnant).
 fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
@@ -62,7 +70,28 @@ fn byte(b: &[u8], i: &mut usize, ok: impl Fn(u8) -> bool) -> Option<u8> {
 }
 
 impl Timestamp {
-    /// RFC 3339 section 5.6 `date-time`; `:60` is a leap second and denotes the next second.
+    /// Parses an RFC 3339 section 5.6 `date-time`; `:60` is a leap second and denotes the next
+    /// second.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TimestampError`] when the text is not a `date-time`: a field is missing or out of
+    /// range, the offset is absent, or anything follows the offset.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use turul_ai_catalog::timestamp::Timestamp;
+    ///
+    /// // The same instant written in two offsets is equal.
+    /// let utc = Timestamp::parse("2026-03-01T12:00:00Z")?;
+    /// let offset = Timestamp::parse("2026-03-01T14:00:00+02:00")?;
+    /// assert_eq!(utc, offset);
+    /// assert_eq!(utc.to_string(), "2026-03-01T12:00:00Z");
+    ///
+    /// assert!(Timestamp::parse("2026-03-01").is_err());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     pub fn parse(s: &str) -> Result<Self, TimestampError> {
         Self::parse_inner(s.as_bytes()).ok_or(TimestampError)
     }
@@ -129,6 +158,7 @@ impl Timestamp {
         Some(Self { secs, nanos })
     }
 
+    /// Converts a [`SystemTime`] to the instant it denotes.
     pub fn from_system_time(t: SystemTime) -> Self {
         match t.duration_since(UNIX_EPOCH) {
             Ok(d) => Self {

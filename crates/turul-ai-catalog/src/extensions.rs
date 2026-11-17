@@ -1,4 +1,6 @@
-//! Extension keys and the policy-urls extension (#format-and-key-naming, #policy-urls-extension).
+//! Extension keys and the policy-urls extension
+//! ([#format-and-key-naming](https://ai-catalog.io/specification/#format-and-key-naming),
+//! [#policy-urls-extension](https://ai-catalog.io/specification/#policy-urls-extension)).
 
 use crate::json::Json;
 use crate::model::CatalogEntry;
@@ -25,13 +27,16 @@ pub(crate) fn is_valid_key(key: &str) -> bool {
         })
 }
 
-/// The policy-urls extension value.
+/// The policy-urls extension value, borrowed from the entry that carries it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PolicyUrls<'a> {
+    /// The `privacyPolicyUrl` member.
     pub privacy_policy_url: Option<&'a str>,
+    /// The `termsOfServiceUrl` member.
     pub terms_of_service_url: Option<&'a str>,
 }
 
+/// Why [`CatalogEntry::policy_urls`] refuses the extension value.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PolicyUrlsError {
     /// The value is not a JSON object.
@@ -40,8 +45,42 @@ pub enum PolicyUrlsError {
     MemberNotString(String),
 }
 
+impl std::fmt::Display for PolicyUrlsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotObject => f.write_str("policy-urls value is not an object"),
+            Self::MemberNotString(name) => write!(f, "policy-urls member {name} is not a string"),
+        }
+    }
+}
+
+impl std::error::Error for PolicyUrlsError {}
+
 impl CatalogEntry {
-    /// The policy-urls extension of this entry; `Ok(None)` when absent.
+    /// Returns the policy-urls extension of this entry; `Ok(None)` when absent.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PolicyUrlsError::NotObject`] when the extension value is not a JSON object and
+    /// [`PolicyUrlsError::MemberNotString`] when `privacyPolicyUrl` or `termsOfServiceUrl` is
+    /// present and not a string.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use turul_ai_catalog::parse::parse_entry;
+    ///
+    /// let entry = parse_entry(br#"{
+    ///   "identifier":"urn:air:example.com:mcp:weather",
+    ///   "type":"application/mcp-server-card+json",
+    ///   "url":"https://mcp.example.com/.well-known/mcp/server-card.json",
+    ///   "extensions":{"https://ai-catalog.org/extensions/policy-urls":
+    ///     {"privacyPolicyUrl":"https://example.com/privacy"}}}"#)?;
+    /// let policy = entry.policy_urls()?.ok_or("policy-urls present")?;
+    /// assert_eq!(policy.privacy_policy_url, Some("https://example.com/privacy"));
+    /// assert_eq!(policy.terms_of_service_url, None);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     pub fn policy_urls(&self) -> Result<Option<PolicyUrls<'_>>, PolicyUrlsError> {
         let Some(v) = self.extensions.as_ref().and_then(|m| m.get(POLICY_URLS)) else {
             return Ok(None);

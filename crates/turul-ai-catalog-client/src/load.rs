@@ -1,4 +1,4 @@
-//! `load`: the fetch half and the traversal half.
+//! [`load`]: fetches or reads a root catalog and follows its nested catalogs.
 
 use std::fmt;
 use std::sync::Arc;
@@ -14,15 +14,21 @@ use crate::reference::resolve_reference;
 use crate::source::Source;
 use crate::tree::{Child, EntryRow, Nested, ResolvedCatalog, SkipReason};
 
+/// Why [`load`] could not load the root catalog.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub enum LoadError {
+    /// The root file could not be read.
     Io(Arc<std::io::Error>),
+    /// The root file is not a parseable catalog.
     Parse(ParseError),
+    /// The root request was refused or failed.
     Fetch(FetchError),
+    /// The root response was not an acceptable catalog.
     Accept(AcceptError),
-    /// The root needed more than `FetchPolicy::max_requests` requests.
+    /// The root needed more than [`FetchPolicy::max_requests`] requests.
     Budget {
+        /// The request limit, [`FetchPolicy::max_requests`].
         limit: u32,
     },
 }
@@ -39,16 +45,51 @@ impl fmt::Display for LoadError {
     }
 }
 
-impl std::error::Error for LoadError {}
+impl std::error::Error for LoadError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            LoadError::Io(e) => e.source(),
+            LoadError::Parse(e) => e.source(),
+            LoadError::Fetch(e) => e.source(),
+            LoadError::Accept(e) => e.source(),
+            LoadError::Budget { .. } => None,
+        }
+    }
+}
 
 /// Loads a catalog and the catalogs nested in it by `url`.
 ///
 /// Nested catalogs are followed depth-first in entry order, one request at a time, to level 4
-/// (`MAX_NESTING_DEPTH`; the root is level 1). A nested catalog on the current path, a level
-/// beyond the limit, an unresolvable `url`, a failed fetch or a spent request budget
-/// (`FetchPolicy::max_requests`) leaves that child `Skipped`; only a root failure is `Err`.
+/// (the root is level 1). A nested catalog on the current path, a level beyond the limit, an
+/// unresolvable `url`, a failed fetch or a spent request budget
+/// ([`FetchPolicy::max_requests`]) leaves that child [`Child::Skipped`]; only a root failure
+/// is an error. Each loaded catalog is validated; the diagnostics are in its
+/// [`report`](ResolvedCatalog::report) and do not fail the load.
 ///
 /// Blocking: call through `tokio::task::spawn_blocking` from async code.
+///
+/// # Errors
+///
+/// Returns [`LoadError::Io`] when a root file cannot be read, [`LoadError::Parse`] when it does
+/// not parse, [`LoadError::Fetch`] or [`LoadError::Accept`] when the root request fails or its
+/// response is refused by [`accept_response`], and [`LoadError::Budget`] when the root request
+/// cannot be sent within [`FetchPolicy::max_requests`].
+///
+/// # Examples
+///
+/// ```
+/// use turul_ai_catalog_client::{FetchPolicy, Source, load};
+///
+/// let dir = std::env::temp_dir().join(format!("ai-catalog-load-doc-{}", std::process::id()));
+/// std::fs::create_dir_all(&dir)?;
+/// let file = dir.join("ai-catalog.json");
+/// std::fs::write(&file, br#"{"specVersion":"1.0","entries":[]}"#)?;
+///
+/// let tree = load(&Source::File(file), &FetchPolicy::default())?;
+/// assert!(tree.rows.is_empty());
+/// assert!(!tree.has_errors());
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 pub fn load(source: &Source, policy: &FetchPolicy) -> Result<ResolvedCatalog, LoadError> {
     let mut budget = RequestBudget::new(policy.max_requests);
     let mut path = Vec::new();

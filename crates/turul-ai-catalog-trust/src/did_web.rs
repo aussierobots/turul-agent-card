@@ -1,5 +1,5 @@
 //! `did:web` resolution, the DID document the profile reads, and verification-key selection
-//! (#did-document-resolution-and-key-selection, #current-state-verification).
+//! ([#did-document-resolution-and-key-selection](https://ai-catalog.io/specification/#did-document-resolution-and-key-selection), [#current-state-verification](https://ai-catalog.io/specification/#current-state-verification)).
 
 use std::fmt;
 
@@ -16,12 +16,24 @@ const DID_JSON: &str = "application/did+json";
 const DID_LD_JSON: &str = "application/did+ld+json";
 const JSON: &str = "application/json";
 
-/// The URL of the DID document of a root `did:web` DID.
+/// Returns the URL of the DID document of a root `did:web` DID.
+///
+/// # Examples
+///
+/// ```
+/// use turul_ai_catalog_trust::{DidWebRoot, document_url};
+///
+/// let root = DidWebRoot::parse("did:web:example.com").ok_or("not a root did:web DID")?;
+/// assert_eq!(document_url(&root), "https://example.com/.well-known/did.json");
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 pub fn document_url(root: &DidWebRoot) -> String {
     format!("https://{}/.well-known/did.json", root.domain())
 }
 
 /// A DID document that passed [`accept_document`] for its signer.
+///
+/// Only [`accept_document`] and [`resolve`] construct one.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DidDocument {
     id: DidWebRoot,
@@ -29,7 +41,7 @@ pub struct DidDocument {
 }
 
 impl DidDocument {
-    /// The DID the document is for, equal to its `id`.
+    /// Returns the DID the document is for, equal to its `id`.
     pub fn id(&self) -> &DidWebRoot {
         &self.id
     }
@@ -42,16 +54,21 @@ impl DidDocument {
     }
 }
 
-/// A DID document that cannot be retrieved or validated.
+/// Reports why a DID document cannot be retrieved or validated.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub enum ResolveError {
+    /// Retrieval failed.
     Fetch(FetchError),
+    /// The response status was not 200.
     Status(u16),
+    /// The `Content-Type` is not a DID or JSON media type; `None` when it is missing.
     MediaType(Option<String>),
+    /// The body is not strict JSON.
     Json(ParseError),
     /// A member the profile reads has the wrong shape.
     Invalid {
+        /// Location of the member within the document.
         pointer: JsonPointer,
     },
     /// `id` is not exactly the signer.
@@ -61,18 +78,26 @@ pub enum ResolveError {
 impl fmt::Display for ResolveError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Fetch(e) => write!(f, "{e}"),
+            Self::Fetch(_) => f.write_str("DID document fetch failed"),
             Self::Status(s) => write!(f, "unexpected status {s}"),
             Self::MediaType(Some(m)) => write!(f, "unsupported media type {m:?}"),
             Self::MediaType(None) => f.write_str("missing Content-Type"),
-            Self::Json(e) => write!(f, "{e}"),
+            Self::Json(_) => f.write_str("DID document is not valid JSON"),
             Self::Invalid { pointer } => write!(f, "invalid DID document at {pointer}"),
             Self::IdMismatch => f.write_str("DID document id is not the signer"),
         }
     }
 }
 
-impl std::error::Error for ResolveError {}
+impl std::error::Error for ResolveError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Fetch(e) => Some(e),
+            Self::Json(e) => Some(e),
+            _ => None,
+        }
+    }
+}
 
 fn invalid(pointer: JsonPointer) -> ResolveError {
     ResolveError::Invalid { pointer }
@@ -130,6 +155,29 @@ fn check_shape(json: &Json) -> Result<(), ResolveError> {
 
 /// The one DID-document gate: status 200, a DID or JSON media type, strict JSON, the shape of
 /// what the profile reads, and `id` exactly equal to `root`.
+///
+/// # Errors
+///
+/// - [`ResolveError::Status`] when the status is not 200.
+/// - [`ResolveError::MediaType`] when `Content-Type` is missing or not `application/did+json`,
+///   `application/did+ld+json` or `application/json`.
+/// - [`ResolveError::Json`] when the body is not strict JSON.
+/// - [`ResolveError::Invalid`] when a member the profile reads has the wrong shape.
+/// - [`ResolveError::IdMismatch`] when `id` is not exactly `root`.
+///
+/// # Examples
+///
+/// ```
+/// use turul_ai_catalog_client::Fetched;
+/// use turul_ai_catalog_trust::{DidWebRoot, accept_document};
+///
+/// let root = DidWebRoot::parse("did:web:example.com").ok_or("not a root did:web DID")?;
+/// let body = br#"{"id":"did:web:example.com"}"#.to_vec();
+/// let fetched = Fetched::new(200, Some("application/did+json".into()), body);
+/// let doc = accept_document(&fetched, &root)?;
+/// assert_eq!(doc.id(), &root);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 pub fn accept_document(fetched: &Fetched, root: &DidWebRoot) -> Result<DidDocument, ResolveError> {
     if fetched.status != 200 {
         return Err(ResolveError::Status(fetched.status));
@@ -155,8 +203,13 @@ pub fn accept_document(fetched: &Fetched, root: &DidWebRoot) -> Result<DidDocume
     })
 }
 
-/// Fetches the DID document current now and accepts it. Blocking: call it through
-/// `spawn_blocking` from async code.
+/// Fetches the DID document current now and accepts it with [`accept_document`].
+///
+/// Blocking: call it through `tokio::task::spawn_blocking` from async code.
+///
+/// # Errors
+///
+/// [`ResolveError::Fetch`] when retrieval fails, otherwise the errors of [`accept_document`].
 pub fn resolve(root: &DidWebRoot, policy: &FetchPolicy) -> Result<DidDocument, ResolveError> {
     let fetched = fetch(&document_url(root), policy).map_err(ResolveError::Fetch)?;
     accept_document(&fetched, root)
@@ -166,6 +219,7 @@ pub fn resolve(root: &DidWebRoot, policy: &FetchPolicy) -> Result<DidDocument, R
 pub struct PublicJwk(Es256PublicKey);
 
 impl PublicJwk {
+    /// Returns the validated public key.
     pub fn key(&self) -> &Es256PublicKey {
         &self.0
     }
@@ -177,16 +231,26 @@ impl fmt::Debug for PublicJwk {
     }
 }
 
-/// No verification key for a `kid`.
+/// Reports why no verification key could be selected for a `kid`.
 #[derive(Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum KeySelectionError {
+    /// No verification method has the `kid`.
     NotFound,
+    /// More than one verification method has the `kid`.
     Ambiguous,
+    /// `assertionMethod` does not authorise the `kid`.
     NotAuthorized,
+    /// The method's `controller` is not the document's DID.
     ControllerMismatch,
+    /// The method has no `publicKeyJwk`.
     NoPublicKeyJwk,
-    JwkNotIJson { pointer: JsonPointer },
+    /// The `publicKeyJwk` is not I-JSON.
+    JwkNotIJson {
+        /// Location of the offending value within the JWK.
+        pointer: JsonPointer,
+    },
+    /// The validator refused the `publicKeyJwk` as a P-256 key.
     Jwk(DetachedJwsError),
 }
 
@@ -199,12 +263,19 @@ impl fmt::Display for KeySelectionError {
             Self::ControllerMismatch => f.write_str("controller is not the signer"),
             Self::NoPublicKeyJwk => f.write_str("verification method has no publicKeyJwk"),
             Self::JwkNotIJson { pointer } => write!(f, "publicKeyJwk is not I-JSON at {pointer}"),
-            Self::Jwk(e) => write!(f, "{e}"),
+            Self::Jwk(_) => f.write_str("publicKeyJwk is not a valid P-256 key"),
         }
     }
 }
 
-impl std::error::Error for KeySelectionError {}
+impl std::error::Error for KeySelectionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Jwk(e) => Some(e),
+            _ => None,
+        }
+    }
+}
 
 /// A `#fragment` resolves against the document `id`; any other value is compared as given.
 fn resolved(value: &str, id: &str) -> String {
@@ -232,8 +303,12 @@ fn id_of(method: &Json) -> &str {
     }
 }
 
-/// The one verification method for `kid`, authorised by `assertionMethod`, controlled by the
-/// document's DID, with a valid P-256 `publicKeyJwk`.
+/// Selects the one verification method for `kid`, authorised by `assertionMethod`, controlled
+/// by the document's DID, with a valid P-256 `publicKeyJwk`.
+///
+/// # Errors
+///
+/// The [`KeySelectionError`] variant that names the first requirement the document fails.
 pub fn select_key(doc: &DidDocument, kid: &Kid) -> Result<PublicJwk, KeySelectionError> {
     let id = doc.id.as_str();
     let want = kid.as_str();

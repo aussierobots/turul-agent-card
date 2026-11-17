@@ -13,7 +13,9 @@ use crate::store::{
 
 const MEMORY: &str = ":memory:";
 
-/// Records in a SQLite database. `connect` creates the file and the table when missing.
+/// Records in a SQLite database.
+///
+/// [`SqliteCatalogStore::connect`] creates the file and the tables when missing.
 pub struct SqliteCatalogStore {
     pool: SqlitePool,
 }
@@ -24,6 +26,10 @@ fn backend(e: sqlx::Error) -> StoreError {
 
 impl SqliteCatalogStore {
     /// Opens the database at `path`; `":memory:"` opens a private in-memory database.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Backend`] when the database cannot be opened or its tables created.
     pub async fn connect(path: &str) -> Result<Self, StoreError> {
         let (options, pool_options) = if path == MEMORY {
             // Each connection to an in-memory database is its own database, so the pool holds

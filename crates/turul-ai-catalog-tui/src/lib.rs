@@ -1,8 +1,5 @@
-//! Terminal view over a resolved AI Catalog tree.
-//!
-//! `render` draws from a [`ResolvedCatalog`] and a [`ViewState`] only. Every string that comes
-//! from a document, a report or a URL reaches the buffer as [`DisplayText`]; `data` is shown only
-//! as the text of its canonical JSON, whatever the entry `type` is (#embedded-content-safety).
+#![doc = include_str!("../README.md")]
+#![warn(missing_docs)]
 
 use std::fmt;
 use std::io::{self, IsTerminal};
@@ -19,25 +16,30 @@ use turul_ai_catalog_client::{Child, DisplayText, EntryRow, ResolvedCatalog, Ski
 
 const DETAIL_HEIGHT: u16 = 12;
 
-/// What the session does after a key.
+/// What the session does after a key press.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Action {
+    /// Keep the session running.
     Continue,
+    /// End the session.
     Quit,
 }
 
-/// The selection over every entry row of the tree, in the order `render` draws them.
+/// Holds the selection over every entry row of the tree, in the order [`render`] draws them.
 #[derive(Clone, Debug, Default)]
 pub struct ViewState {
     selected: usize,
 }
 
 impl ViewState {
+    /// Creates a state with the first entry selected.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Applies a key press and returns what the session does next.
+    ///
     /// Up/Down and `k`/`j` move the selection within bounds; `q`, Esc and Ctrl-C quit; every
     /// other key changes nothing.
     pub fn on_key(&mut self, key: KeyEvent, catalog: &ResolvedCatalog) -> Action {
@@ -196,7 +198,9 @@ fn detail_lines(node: &ResolvedCatalog, row: &EntryRow) -> Vec<Line<'static>> {
     lines
 }
 
-/// Draws the whole tree and the selected entry's detail. Pure: reads only its arguments.
+/// Draws the whole tree and the selected entry's detail into `frame`.
+///
+/// Reads only its arguments: the same catalog and state always draw the same buffer.
 pub fn render(catalog: &ResolvedCatalog, state: &ViewState, frame: &mut Frame) {
     let mut out = Drawn {
         lines: Vec::new(),
@@ -223,11 +227,13 @@ pub fn render(catalog: &ResolvedCatalog, state: &ViewState, frame: &mut Frame) {
     );
 }
 
-/// Why a terminal session did not run or failed.
+/// Describes why a terminal session did not run or failed.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum RunError {
+    /// Stdin or stdout is not a terminal.
     NotATerminal,
+    /// Reading events or drawing to the terminal failed.
     Io(io::Error),
 }
 
@@ -235,12 +241,19 @@ impl fmt::Display for RunError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             RunError::NotATerminal => f.write_str("stdin and stdout must both be terminals"),
-            RunError::Io(e) => write!(f, "terminal error: {e}"),
+            RunError::Io(_) => f.write_str("terminal error"),
         }
     }
 }
 
-impl std::error::Error for RunError {}
+impl std::error::Error for RunError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            RunError::Io(e) => Some(e),
+            RunError::NotATerminal => None,
+        }
+    }
+}
 
 impl From<io::Error> for RunError {
     fn from(e: io::Error) -> Self {
@@ -248,8 +261,12 @@ impl From<io::Error> for RunError {
     }
 }
 
-/// Shows the catalog until a quit key. Returns `NotATerminal` before touching the terminal
-/// unless stdin and stdout are both terminals.
+/// Shows the catalog until a quit key, then restores the terminal.
+///
+/// # Errors
+///
+/// Returns [`RunError::NotATerminal`], before touching the terminal, unless stdin and stdout are
+/// both terminals. Returns [`RunError::Io`] if reading events or drawing fails.
 pub fn run(catalog: ResolvedCatalog) -> Result<(), RunError> {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         return Err(RunError::NotATerminal);

@@ -1,5 +1,4 @@
-//! `turul-ai-catalog`: validate, list and view a catalog; init, add and remove entries.
-//! A thin layer: every catalog operation is a call into the client.
+#![doc = include_str!("../README.md")]
 
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -155,7 +154,7 @@ impl SourceArgs {
             (_, _, Some(host)) => {
                 let source = WellKnownHost::new(&host)
                     .map(Source::WellKnown)
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| turul_ai_catalog::error::chain(&e))?;
                 Ok((source, host))
             }
             _ => Err("exactly one source flag is required".to_string()),
@@ -163,10 +162,12 @@ impl SourceArgs {
     }
 }
 
+/// Parses the command line, runs the command and maps its result to the exit code.
 fn main() -> ExitCode {
     ExitCode::from(run(Cli::parse().command))
 }
 
+/// Runs one command and returns its exit code.
 fn run(command: Command) -> u8 {
     match command {
         Command::Validate { format, source } => {
@@ -231,6 +232,7 @@ fn run(command: Command) -> u8 {
     }
 }
 
+/// Writes `message` to stderr and returns the failure exit code.
 fn fail(message: &str) -> u8 {
     eprintln!("{}", DisplayText::new(message));
     FAILED
@@ -260,7 +262,7 @@ fn read_only(
         Format::Text => text(&shown, &label, &mut stdout),
         Format::Json => match shown.to_json().to_canonical_vec() {
             Ok(bytes) => stdout.write_all(&bytes),
-            Err(e) => return fail(&e.to_string()),
+            Err(e) => return fail(&turul_ai_catalog::error::chain(&e)),
         },
     }
     .and_then(|()| stdout.flush());
@@ -270,6 +272,7 @@ fn read_only(
     exit_code(&tree)
 }
 
+/// Loads the tree and hands it to the terminal browser; the exit code follows the loaded tree.
 fn view(source: SourceArgs) -> u8 {
     let (source, _) = match source.source() {
         Ok(s) => s,
@@ -283,12 +286,13 @@ fn view(source: SourceArgs) -> u8 {
     match turul_ai_catalog_tui::run(tree) {
         Ok(()) => code,
         Err(RunError::NotATerminal) => fail(&RunError::NotATerminal.to_string()),
-        Err(e) => fail(&e.to_string()),
+        Err(e) => fail(&turul_ai_catalog::error::chain(&e)),
     }
 }
 
+/// Reports a load failure on stderr and returns the failure exit code.
 fn load_failed(e: &LoadError) -> u8 {
-    fail(&e.to_string())
+    fail(&turul_ai_catalog::error::chain(&e))
 }
 
 /// One rule for every command: 1 when any loaded catalog has an error diagnostic.
@@ -296,6 +300,7 @@ fn exit_code(tree: &ResolvedCatalog) -> u8 {
     if tree.has_errors() { ERRORS } else { OK }
 }
 
+/// Applies `change` to `file`, prints the resulting diagnostics to stderr and returns the exit code.
 fn produced(file: &std::path::Path, change: &Change) -> u8 {
     match produce(file, change) {
         Ok(report) => {
@@ -310,7 +315,7 @@ fn produced(file: &std::path::Path, change: &Change) -> u8 {
             }
             ERRORS
         }
-        Err(e) => fail(&e.to_string()),
+        Err(e) => fail(&turul_ai_catalog::error::chain(&e)),
     }
 }
 
@@ -332,6 +337,7 @@ fn write_warnings(tree: &ResolvedCatalog, out: &mut dyn Write) -> io::Result<()>
     Ok(())
 }
 
+/// Formats one diagnostic as `<severity> <code> <pointer>`.
 fn diagnostic_line(d: &Diagnostic) -> String {
     let severity = match d.severity {
         Severity::Error => "error",
@@ -344,6 +350,7 @@ fn diagnostic_line(d: &Diagnostic) -> String {
     )
 }
 
+/// Writes the conformance, diagnostics and skipped children of every catalog node.
 fn validate_text(tree: &ResolvedCatalog, label: &str, out: &mut dyn Write) -> io::Result<()> {
     writeln!(
         out,
@@ -381,6 +388,7 @@ fn validate_text(tree: &ResolvedCatalog, label: &str, out: &mut dyn Write) -> io
     Ok(())
 }
 
+/// Writes one line per entry row of every catalog node.
 fn list_text(tree: &ResolvedCatalog, out: &mut dyn Write) -> io::Result<()> {
     for row in &tree.rows {
         let entry = &tree.document.entries[row.index];
@@ -406,7 +414,7 @@ mod tests {
     use super::*;
     use turul_ai_catalog_client::LoadWarning;
 
-    // a load warning is one stderr line and never changes the exit code.
+    // A load warning is one stderr line and never changes the exit code.
     #[test]
     fn load_warnings_are_one_stderr_line_each_and_keep_the_exit_code() {
         let path: PathBuf = [

@@ -1,22 +1,26 @@
-//! The one digest parser (#digest-format).
+//! The one digest parser, for the `algorithm:hex-value` form of
+//! [#digest-format](https://ai-catalog.io/specification/#digest-format).
 
 /// A hash algorithm named by a digest.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum DigestAlgorithm {
+    /// SHA-256 (64 hex digits).
     Sha256,
+    /// SHA-384 (96 hex digits).
     Sha384,
+    /// SHA-512 (128 hex digits).
     Sha512,
     /// A well-formed name this crate cannot compute.
     Other(String),
 }
 
-/// Why a digest value is refused.
+/// Why [`DigestValue::parse`] refuses a digest value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DigestError {
     /// Not `algorithm:lowercase-hex`, or not the output length of a known algorithm.
     Invalid,
-    /// The output is shorter than SHA-256 (#digest-format: "MUST reject").
+    /// The output is shorter than SHA-256 ([#digest-format](https://ai-catalog.io/specification/#digest-format): "MUST reject").
     Weak,
 }
 
@@ -27,7 +31,47 @@ pub struct DigestValue {
     hex: String,
 }
 
+impl DigestError {
+    fn message(self) -> &'static str {
+        match self {
+            Self::Invalid => "digest is not algorithm:lowercase-hex of a known length",
+            Self::Weak => "digest output is shorter than SHA-256",
+        }
+    }
+}
+
+impl std::fmt::Display for DigestError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.message())
+    }
+}
+
+impl std::error::Error for DigestError {}
+
 impl DigestValue {
+    /// Parses an `algorithm:hex-value` digest.
+    ///
+    /// The algorithm name is matched case-insensitively; the hex value must be lowercase and,
+    /// for `sha256`, `sha384` and `sha512`, exactly the output length of that algorithm.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DigestError::Invalid`] when the text is not `algorithm:lowercase-hex` or the
+    /// length does not match a known algorithm, and [`DigestError::Weak`] when the output is
+    /// shorter than SHA-256.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use turul_ai_catalog::digest::{DigestAlgorithm, DigestError, DigestValue};
+    ///
+    /// let digest = DigestValue::parse(&format!("sha256:{}", "ab".repeat(32)))?;
+    /// assert_eq!(digest.algorithm(), DigestAlgorithm::Sha256);
+    /// assert_eq!(digest.hex().len(), 64);
+    ///
+    /// assert_eq!(DigestValue::parse("md5:d41d8cd98f00b204e9800998ecf8427e"), Err(DigestError::Weak));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     pub fn parse(s: &str) -> Result<Self, DigestError> {
         let (name, hex) = s.split_once(':').ok_or(DigestError::Invalid)?;
         if !is_algorithm_name(name)
@@ -58,10 +102,12 @@ impl DigestValue {
         })
     }
 
+    /// Returns the algorithm the digest names.
     pub fn algorithm(&self) -> DigestAlgorithm {
         self.algorithm.clone()
     }
 
+    /// Returns the lowercase hex output, without the algorithm prefix.
     pub fn hex(&self) -> &str {
         &self.hex
     }

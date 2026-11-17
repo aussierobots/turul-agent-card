@@ -1,15 +1,29 @@
-//! Identity shapes: a root `did:web` DID and an `urn:air` identifier.
+//! Identity shapes: a root `did:web` DID and a `urn:air` identifier.
 
 const PREFIX: &str = "did:web:";
 const LABEL_SEP: char = '.';
 const URN_AIR: &str = "urn:air:";
 
 /// A root `did:web` DID whose domain is lowercase ASCII LDH labels and no IP address spelling
-/// (#the-did-web-signer-profile). `xn--` A-labels pass as LDH text and are not IDNA-validated.
+/// ([#the-did-web-signer-profile](https://ai-catalog.io/specification/#the-did-web-signer-profile)). `xn--` A-labels pass as LDH text and are not IDNA-validated.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct DidWebRoot(String);
 
 impl DidWebRoot {
+    /// Returns the DID when `s` is a root `did:web` DID, else `None`.
+    ///
+    /// Paths, ports, uppercase and IP address spellings are refused.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use turul_ai_catalog_trust::DidWebRoot;
+    ///
+    /// let did = DidWebRoot::parse("did:web:example.com").ok_or("not a root did:web DID")?;
+    /// assert_eq!(did.domain(), "example.com");
+    /// assert!(DidWebRoot::parse("did:web:example.com:user").is_none());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     pub fn parse(s: &str) -> Option<Self> {
         let domain = s.strip_prefix(PREFIX)?;
         if domain.is_empty() || domain.len() > 253 {
@@ -39,18 +53,18 @@ impl DidWebRoot {
         Some(Self(s.to_string()))
     }
 
-    /// The whole DID.
+    /// Returns the whole DID.
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
-    /// The domain after `did:web:`.
+    /// Returns the domain after `did:web:`.
     pub fn domain(&self) -> &str {
         &self.0[PREFIX.len()..]
     }
 }
 
-/// An `urn:air` identifier split into publisher, namespace and name. The publisher is not
+/// A `urn:air` identifier split into publisher, namespace and name. The publisher is not
 /// checked against the `did:web` domain rule here.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UrnAir {
@@ -60,6 +74,20 @@ pub struct UrnAir {
 }
 
 impl UrnAir {
+    /// Returns the identifier when `s` is `urn:air:` followed by at least a publisher, a
+    /// namespace and a name, all non-empty, else `None`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use turul_ai_catalog_trust::UrnAir;
+    ///
+    /// let urn = UrnAir::parse("urn:air:example.com:a2a:research").ok_or("not an urn:air")?;
+    /// assert_eq!(urn.publisher(), "example.com");
+    /// assert_eq!(urn.namespace(), "a2a");
+    /// assert_eq!(urn.name(), "research");
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     pub fn parse(s: &str) -> Option<Self> {
         let parts: Vec<&str> = s.strip_prefix(URN_AIR)?.split(':').collect();
         if parts.len() < 3 || parts.iter().any(|p| p.is_empty()) {
@@ -72,15 +100,17 @@ impl UrnAir {
         })
     }
 
+    /// Returns the publisher component.
     pub fn publisher(&self) -> &str {
         &self.publisher
     }
 
-    /// Every component between publisher and name, `:` kept.
+    /// Returns every component between publisher and name, `:` kept.
     pub fn namespace(&self) -> &str {
         &self.namespace
     }
 
+    /// Returns the name component.
     pub fn name(&self) -> &str {
         &self.name
     }

@@ -1,4 +1,4 @@
-//! `ResolvedCatalog::to_json`: the one JSON output of a tree.
+//! [`ResolvedCatalog::to_json`]: the columnar JSON output of a tree.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -76,7 +76,26 @@ fn legend<T: AsRef<str> + Ord>(set: &BTreeSet<T>) -> (Json, BTreeMap<&str, usize
 }
 
 impl ResolvedCatalog {
-    /// The columnar JSON output; `to_canonical_vec` of it is the canonical bytes.
+    /// Returns the tree as columnar JSON: a `legend` of shared strings and a `root` node whose
+    /// `entries` and `diagnostics` hold one array per field.
+    ///
+    /// `to_canonical_vec` of the result gives the canonical bytes.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use turul_ai_catalog_client::{FetchPolicy, Source, load};
+    ///
+    /// let dir = std::env::temp_dir().join(format!("ai-catalog-json-doc-{}", std::process::id()));
+    /// std::fs::create_dir_all(&dir)?;
+    /// let file = dir.join("ai-catalog.json");
+    /// std::fs::write(&file, br#"{"specVersion":"1.0","entries":[]}"#)?;
+    /// let tree = load(&Source::File(file), &FetchPolicy::default())?;
+    ///
+    /// let json = tree.to_json();
+    /// assert!(matches!(json, turul_ai_catalog::json::Json::Object(_)));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     pub fn to_json(&self) -> Json {
         let mut vocab = Vocabulary::default();
         self.collect(&mut vocab);
@@ -154,7 +173,7 @@ impl ResolvedCatalog {
             ),
         ]);
 
-        // Warnings first (path ""), then the report in order.
+        // Warnings first (empty path), then the report in order.
         let mut rows: Vec<(&str, &str, String)> = self
             .warnings
             .iter()

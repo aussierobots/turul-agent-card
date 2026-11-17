@@ -69,6 +69,10 @@ assert!(parse(br#"{"specVersion":"1.0"}"#).is_err()); // `entries` is required
 A catalog does not parse or model the artifacts it lists: an A2A Agent Card or MCP Server Card is
 referenced by `url`, or embedded as opaque JSON in `data`, and declared by its `type`.
 
+## Feature flags
+
+None. The crate has no dependencies and no optional features.
+
 ## Licence
 
 Apache-2.0.

@@ -1,4 +1,5 @@
-//! Serves the AI Catalog assembled from a catalog store at the well-known URI.
+#![doc = include_str!("../README.md")]
+#![warn(missing_docs)]
 
 use std::fmt;
 use std::sync::{Arc, Mutex};
@@ -10,7 +11,7 @@ use turul_ai_catalog::identity::{MEDIA_TYPE, WELL_KNOWN_PATH};
 use turul_ai_catalog::validate::Severity;
 use turul_ai_catalog_storage::{AssembleError, CatalogId, CatalogStore, assemble};
 
-/// Value of `Allow` on a 405 (RFC 9110 section 15.5.6).
+/// Value of the `Allow` header on a 405 response (RFC 9110 section 15.5.6).
 pub const ALLOW: &str = "GET, HEAD";
 
 /// Environment variable naming the catalog in the store.
@@ -22,11 +23,13 @@ pub const MAX_AGE_VAR: &str = "TURUL_AI_CATALOG_MAX_AGE_SECS";
 
 const DEFAULT_MAX_AGE: Duration = Duration::from_secs(60);
 
-/// Why the function cannot start or refresh.
+/// Why the function cannot start or refresh its snapshot.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum ColdStartError {
+    /// The store could not be read, or the assembled catalog is invalid or not canonicalisable.
     Assemble(AssembleError),
+    /// An environment variable is missing or malformed; the message names it.
     Config(&'static str),
 }
 
@@ -58,14 +61,33 @@ impl From<AssembleError> for ColdStartError {
     }
 }
 
-/// The catalog id from `TURUL_AI_CATALOG_ID`; `raw` is `None` when the variable is unset.
+/// Parses the catalog id from the value of [`ID_VAR`]; `raw` is `None` when the variable is unset.
+///
+/// # Errors
+///
+/// Returns [`ColdStartError::Config`] when `raw` is `None` or is not a valid [`CatalogId`].
+///
+/// # Examples
+///
+/// ```
+/// use turul_ai_catalog_lambda::catalog_id;
+///
+/// let id = catalog_id(Some("default"))?;
+/// assert_eq!(id.as_str(), "default");
+/// assert!(catalog_id(None).is_err());
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 pub fn catalog_id(raw: Option<&str>) -> Result<CatalogId, ColdStartError> {
     let raw = raw.ok_or(ColdStartError::Config("TURUL_AI_CATALOG_ID is not set"))?;
     CatalogId::new(raw)
         .map_err(|_| ColdStartError::Config("TURUL_AI_CATALOG_ID is not a valid catalog id"))
 }
 
-/// The table name from `TURUL_AI_CATALOG_TABLE`.
+/// Parses the DynamoDB table name from the value of [`TABLE_VAR`].
+///
+/// # Errors
+///
+/// Returns [`ColdStartError::Config`] when `raw` is `None` or empty.
 #[cfg(feature = "dynamodb")]
 pub fn table_name(raw: Option<&str>) -> Result<String, ColdStartError> {
     match raw {
@@ -74,7 +96,24 @@ pub fn table_name(raw: Option<&str>) -> Result<String, ColdStartError> {
     }
 }
 
-/// The refresh interval from `TURUL_AI_CATALOG_MAX_AGE_SECS`: whole seconds, 60 when unset.
+/// Parses the snapshot refresh interval from the value of [`MAX_AGE_VAR`]: whole seconds, 60 when
+/// unset.
+///
+/// # Errors
+///
+/// Returns [`ColdStartError::Config`] when `raw` is not a whole number of seconds.
+///
+/// # Examples
+///
+/// ```
+/// use std::time::Duration;
+/// use turul_ai_catalog_lambda::max_age;
+///
+/// assert_eq!(max_age(None)?, Duration::from_secs(60));
+/// assert_eq!(max_age(Some("5"))?, Duration::from_secs(5));
+/// assert!(max_age(Some("soon")).is_err());
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 pub fn max_age(raw: Option<&str>) -> Result<Duration, ColdStartError> {
     match raw {
         None => Ok(DEFAULT_MAX_AGE),
@@ -84,14 +123,36 @@ pub fn max_age(raw: Option<&str>) -> Result<Duration, ColdStartError> {
     }
 }
 
-/// Canonical bytes of an assembled catalog that passed `validate` with no error diagnostic.
+/// Canonical bytes of an assembled catalog that passed [`validate`](turul_ai_catalog::validate::validate)
+/// with no error diagnostic.
 #[derive(Debug)]
 pub struct ServedCatalog {
     bytes: Vec<u8>,
 }
 
 impl ServedCatalog {
-    /// Assembles the catalog from the store; any `AssembleError` fails.
+    /// Assembles the catalog from the store with [`assemble`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ColdStartError::Assemble`] for any [`AssembleError`]: a store failure, an error
+    /// diagnostic in the assembled document, or a document that is not canonicalisable.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use turul_ai_catalog_lambda::ServedCatalog;
+    /// use turul_ai_catalog_storage::{CatalogId, InMemoryCatalogStore};
+    ///
+    /// # futures::executor::block_on(async {
+    /// let store = InMemoryCatalogStore::new();
+    /// let catalog = CatalogId::new("default")?;
+    /// let served = ServedCatalog::assemble(&store, &catalog).await?;
+    /// # let _ = served;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// # })?;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     pub async fn assemble(
         store: &dyn CatalogStore,
         catalog: &CatalogId,
@@ -103,13 +164,15 @@ impl ServedCatalog {
     }
 }
 
-/// The last good snapshot and when it was assembled. The clock lives here, never in `handle`.
+/// The last good [`ServedCatalog`] and when it was assembled. The clock lives here, never in
+/// [`handle`].
 pub struct SnapshotCache {
     max_age: Duration,
     state: Mutex<(Arc<ServedCatalog>, Instant)>,
 }
 
 impl SnapshotCache {
+    /// Creates a cache holding `served`, assembled now, that refreshes once it is `max_age` old.
     pub fn new(served: ServedCatalog, max_age: Duration) -> Self {
         Self {
             max_age,
@@ -117,9 +180,10 @@ impl SnapshotCache {
         }
     }
 
-    /// The snapshot to serve: re-assembled when its age is at least `max_age`, and kept as it is
-    /// when re-assembly fails, in which case the failure is returned beside it so the caller can
-    /// report it, and the next attempt waits another `max_age`.
+    /// Returns the snapshot to serve, re-assembled when its age is at least `max_age`.
+    ///
+    /// When re-assembly fails the last good snapshot is kept and the failure is returned beside
+    /// it so the caller can report it; the next attempt waits another `max_age`.
     pub async fn current(
         &self,
         store: &dyn CatalogStore,
@@ -155,7 +219,32 @@ fn empty(status: StatusCode) -> lambda_http::http::response::Builder {
     Response::builder().status(status)
 }
 
-/// Routes by path, then method. Pure: no I/O, clock or state.
+/// Answers a request for the well-known path, routing by path, then method. Pure: no I/O, clock
+/// or state.
+///
+/// `GET` returns the catalog bytes and `HEAD` the same headers with an empty body, both with the
+/// catalog media type; other methods on the path return 405 with `Allow`, and other paths 404.
+///
+/// # Examples
+///
+/// ```
+/// use lambda_http::{Body, http::Request};
+/// use turul_ai_catalog_lambda::{ServedCatalog, handle};
+/// use turul_ai_catalog_storage::{CatalogId, InMemoryCatalogStore};
+///
+/// # futures::executor::block_on(async {
+/// let store = InMemoryCatalogStore::new();
+/// let served = ServedCatalog::assemble(&store, &CatalogId::new("default")?).await?;
+///
+/// let found = Request::builder().uri("/.well-known/ai-catalog.json").body(Body::Empty)?;
+/// assert_eq!(handle(&served, &found).status(), 200);
+///
+/// let missing = Request::builder().uri("/other").body(Body::Empty)?;
+/// assert_eq!(handle(&served, &missing).status(), 404);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// # })?;
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 pub fn handle(served: &ServedCatalog, request: &Request) -> Response<Body> {
     let built = if request.uri().path() != WELL_KNOWN_PATH {
         empty(StatusCode::NOT_FOUND).body(Body::Empty)

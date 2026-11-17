@@ -9,7 +9,9 @@ use crate::store::{
     CatalogStore, Condition, StoreError, Stored, corrupt, key_error, kind_conflict,
 };
 
-/// Records in a PostgreSQL table. `connect` creates the table when missing.
+/// Records in PostgreSQL tables.
+///
+/// [`PostgresCatalogStore::connect`] creates the tables when missing.
 pub struct PostgresCatalogStore {
     pool: PgPool,
 }
@@ -19,7 +21,11 @@ fn backend(e: sqlx::Error) -> StoreError {
 }
 
 impl PostgresCatalogStore {
-    /// Connects to the database at `url` and creates the table when missing.
+    /// Connects to the database at `url` and creates the tables when missing.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Backend`] when the connection or table creation fails.
     pub async fn connect(url: &str) -> Result<Self, StoreError> {
         let pool = PgPoolOptions::new().connect(url).await.map_err(backend)?;
         sqlx::query(

@@ -10,7 +10,8 @@ keywords.workspace = true
 rust-version.workspace = true
 publish = true
 readme = "README.md"
-categories = ["web-programming", "parser-implementations"]
+documentation = "https://docs.rs/turul-ai-catalog-tui"
+categories = ["command-line-utilities", "visualization"]
 exclude = ["tests/fixtures"]
 
 [dependencies]

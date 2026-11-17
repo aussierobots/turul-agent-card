@@ -1,4 +1,6 @@
 //! RFC 8785 (JCS) serialisation: the only code in the workspace that emits JSON text.
+//!
+//! Entry points: [`to_canonical_vec`] for a catalog and [`Json::to_canonical_vec`] for any value.
 
 use std::fmt;
 
@@ -12,7 +14,10 @@ use crate::number;
 pub enum CanonicalError {
     /// A number whose nearest double is not finite, or a string or member name holding a
     /// noncharacter.
-    NotIJson { pointer: JsonPointer },
+    NotIJson {
+        /// Location of the offending value in the serialised value.
+        pointer: JsonPointer,
+    },
 }
 
 impl fmt::Display for CanonicalError {
@@ -25,13 +30,49 @@ impl fmt::Display for CanonicalError {
 
 impl std::error::Error for CanonicalError {}
 
-/// Canonical bytes of a document: `catalog.to_json().to_canonical_vec()`.
+/// Returns the RFC 8785 canonical bytes of a catalog: `catalog.to_json().to_canonical_vec()`.
+///
+/// The same catalog always yields the same bytes, whatever order its members were built in.
+///
+/// # Errors
+///
+/// Returns [`CanonicalError::NotIJson`] when a number's nearest double is not finite or a string
+/// or member name holds a Unicode noncharacter.
+///
+/// # Examples
+///
+/// ```
+/// use turul_ai_catalog::canonical::to_canonical_vec;
+/// use turul_ai_catalog::parse::parse;
+///
+/// let catalog = parse(br#"{"specVersion":"1.0","entries":[]}"#)?;
+/// assert_eq!(to_canonical_vec(&catalog)?, br#"{"entries":[],"specVersion":"1.0"}"#);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 pub fn to_canonical_vec(catalog: &AiCatalog) -> Result<Vec<u8>, CanonicalError> {
     catalog.to_json().to_canonical_vec()
 }
 
 impl Json {
-    /// RFC 8785 bytes of this value.
+    /// Returns the RFC 8785 canonical bytes of this value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CanonicalError::NotIJson`] when a number's nearest double is not finite or a
+    /// string or member name holds a Unicode noncharacter.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use turul_ai_catalog::json::read;
+    ///
+    /// // Numbers take their ECMAScript form: the nearest double, shortest round-trip digits.
+    /// let bytes = read(br#"{"b":[1.0,1e3,9007199254740993],"a":null}"#)?.to_canonical_vec()?;
+    /// assert_eq!(bytes, br#"{"a":null,"b":[1,1000,9007199254740992]}"#);
+    ///
+    /// assert!(read(b"1e400")?.to_canonical_vec().is_err());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     pub fn to_canonical_vec(&self) -> Result<Vec<u8>, CanonicalError> {
         write_canonical(self)
     }

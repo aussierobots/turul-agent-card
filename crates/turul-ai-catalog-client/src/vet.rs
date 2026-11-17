@@ -1,4 +1,4 @@
-//! The one address rule: refuse every address that is not globally reachable.
+//! The address rule: refuse every address that is not globally reachable.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 

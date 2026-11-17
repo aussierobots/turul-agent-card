@@ -10,16 +10,21 @@ use crate::store::{CatalogStore, StoreError};
 /// The served document: canonical bytes and the validation report (warnings only).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Assembled {
+    /// The canonical JSON bytes of the catalog document.
     pub bytes: Vec<u8>,
+    /// The validation report of the document; it has no error diagnostics.
     pub report: Report,
 }
 
+/// Why [`assemble`] failed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AssembleError {
+    /// Reading the records failed.
     Store(StoreError),
     /// The assembled document has an error diagnostic.
     Invalid(Report),
+    /// The assembled document cannot be written as RFC 8785 canonical JSON.
     NotIJson(CanonicalError),
 }
 
@@ -41,8 +46,29 @@ impl From<StoreError> for AssembleError {
     }
 }
 
-/// The one builder of a served catalog: the host record and every entry record, entries ordered
-/// by `EntryKey`, validated, then canonical bytes. The document never carries a signature.
+/// Builds the served catalog document of `catalog`, the one builder of it.
+///
+/// Takes the host record and every entry record, orders entries by [`EntryKey`](turul_ai_catalog::identity::EntryKey), validates, then
+/// writes canonical bytes. The document never carries a signature.
+///
+/// # Errors
+///
+/// [`AssembleError::Store`] when reading the records fails; [`AssembleError::Invalid`] when the
+/// assembled document has an error diagnostic; [`AssembleError::NotIJson`] when it cannot be
+/// written as canonical JSON.
+///
+/// # Examples
+///
+/// ```
+/// use turul_ai_catalog_storage::{CatalogId, InMemoryCatalogStore, assemble};
+///
+/// # futures::executor::block_on(async {
+/// let served = assemble(&InMemoryCatalogStore::new(), &CatalogId::new("empty")?).await?;
+/// assert!(!served.report.has_errors());
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// # })?;
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 pub async fn assemble(
     store: &dyn CatalogStore,
     catalog: &CatalogId,

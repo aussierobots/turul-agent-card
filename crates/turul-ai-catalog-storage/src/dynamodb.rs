@@ -93,6 +93,8 @@ fn record_bytes(
 }
 
 impl DynamoDbCatalogStore {
+    /// Creates a store over the existing table `table_name`, which the store neither creates nor
+    /// verifies.
     pub fn new(client: Client, table_name: impl Into<String>) -> Self {
         Self {
             client,

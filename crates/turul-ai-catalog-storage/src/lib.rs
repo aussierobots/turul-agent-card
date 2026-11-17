@@ -1,8 +1,6 @@
-//! Storage for AI Catalog entries.
-//!
-//! A [`CatalogStore`] holds entry-level records, each versioned by a content-derived [`Etag`].
-//! [`assemble`] is the one builder of a served catalog document from stored records, and
-//! [`import`] the one path from a catalog document to records.
+#![doc = include_str!("../README.md")]
+#![warn(missing_docs)]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 mod assembly;
 mod ids;

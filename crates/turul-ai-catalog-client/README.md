@@ -2,9 +2,16 @@
 
 Create AI Catalog files, and load catalogs from files or HTTPS (under the specification's Safe
 Fetching rules), following nested catalogs into one resolved tree. Built on
-[`turul-ai-catalog`](../turul-ai-catalog).
+[`turul-ai-catalog`](https://docs.rs/turul-ai-catalog).
 
 Part of [turul-agent-card](https://github.com/aussierobots/turul-agent-card).
+
+## Features
+
+This crate has no Cargo feature flags.
+
+HTTPS requests are blocking; from async code call [`load`] and [`fetch`] through
+`tokio::task::spawn_blocking`.
 
 ## Quick start
 

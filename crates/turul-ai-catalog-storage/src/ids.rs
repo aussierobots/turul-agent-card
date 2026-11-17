@@ -20,6 +20,21 @@ fn hex(bytes: &[u8]) -> String {
 pub struct CatalogId(String);
 
 impl CatalogId {
+    /// Builds a catalog id from `id`.
+    ///
+    /// # Errors
+    ///
+    /// [`RecordError::InvalidCatalogId`] when `id` is not 1 to 128 bytes of `[A-Za-z0-9._-]`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use turul_ai_catalog_storage::CatalogId;
+    ///
+    /// assert_eq!(CatalogId::new("main")?.as_str(), "main");
+    /// assert!(CatalogId::new("not valid").is_err());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     pub fn new(id: impl Into<String>) -> Result<Self, RecordError> {
         let id = id.into();
         let ok = (1..=128).contains(&id.len())
@@ -33,6 +48,7 @@ impl CatalogId {
         }
     }
 
+    /// Returns the id as a string slice.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -51,6 +67,7 @@ impl fmt::Display for CatalogId {
 pub struct RecordKey(Cow<'static, str>);
 
 impl RecordKey {
+    /// The key of the Host Info record.
     pub const HOST: RecordKey = RecordKey(Cow::Borrowed("h"));
 
     /// Prefix shared by every entry record key.
@@ -59,8 +76,12 @@ impl RecordKey {
     /// Prefix shared by every guard key.
     pub const GUARD_PREFIX: &'static str = "g:";
 
-    /// `"e:"` and the lowercase hex SHA-256 of the canonical JSON array `[identifier, version]`,
-    /// an absent version being `null`.
+    /// Returns `"e:"` and the lowercase hex SHA-256 of the canonical JSON array
+    /// `[identifier, version]`, an absent version being `null`.
+    ///
+    /// # Errors
+    ///
+    /// [`RecordError::NotIJson`] when the key cannot be written as canonical JSON.
     pub fn entry(key: &EntryKey) -> Result<RecordKey, RecordError> {
         let version = match key.version() {
             Some(v) => Json::String(v.to_string()),
@@ -72,9 +93,14 @@ impl RecordKey {
         )
     }
 
-    /// `"g:"` and the lowercase hex SHA-256 of the canonical JSON array `[identifier]`: the key of
-    /// the record that holds an identifier's version kind and entry count, so that one identifier
-    /// never has both unversioned and versioned entries (#multi-version-entries).
+    /// Returns `"g:"` and the lowercase hex SHA-256 of the canonical JSON array `[identifier]`: the
+    /// key of the record that holds an identifier's version kind and entry count, so that one identifier
+    /// never has both unversioned and versioned entries
+    /// ([#multi-version-entries](https://ai-catalog.io/specification/#multi-version-entries)).
+    ///
+    /// # Errors
+    ///
+    /// [`RecordError::NotIJson`] when the key cannot be written as canonical JSON.
     pub fn guard(identifier: &EntryIdentifier) -> Result<RecordKey, RecordError> {
         Self::digest_key(
             Self::GUARD_PREFIX,
@@ -98,10 +124,12 @@ impl RecordKey {
         RecordKey(Cow::Owned(name))
     }
 
+    /// Returns the key as a string slice.
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
+    /// Returns whether the key names an entry record rather than the host or a guard.
     pub fn is_entry(&self) -> bool {
         self.0.starts_with(Self::ENTRY_PREFIX)
     }
@@ -118,10 +146,22 @@ impl fmt::Display for RecordKey {
 pub struct Etag(String);
 
 impl Etag {
+    /// Returns the version of `record_bytes`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use turul_ai_catalog_storage::Etag;
+    ///
+    /// assert_eq!(Etag::of(b"a"), Etag::of(b"a"));
+    /// assert_ne!(Etag::of(b"a"), Etag::of(b"b"));
+    /// assert_eq!(Etag::of(b"").as_str().len(), 64);
+    /// ```
     pub fn of(record_bytes: &[u8]) -> Etag {
         Etag(hex(&Sha256::digest(record_bytes)))
     }
 
+    /// Returns the version as a string slice.
     pub fn as_str(&self) -> &str {
         &self.0
     }
