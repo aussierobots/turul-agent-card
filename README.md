@@ -1,13 +1,11 @@
-[Turul family](https://aussierobots.com.au/turul.html)
+[Project website](https://aussierobots.com.au/turul-agent-card.html) · [Turul family](https://aussierobots.com.au/turul.html)
 
 # Turul Agent Card
 
-<!-- Artwork pending. When docs/assets/turul/logo-{light,dark}.png are added, uncomment:
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/turul/logo-dark.png">
   <img src="docs/assets/turul/logo-light.png" alt="Turul AGENT CARD" width="600">
 </picture>
--->
 
 Rust tooling for [AI Catalog](https://ai-catalog.io), the Linux Foundation
 [Agent Card](https://github.com/Agent-Card) working group's format for discovering AI artifacts.
@@ -175,6 +173,13 @@ cargo test --workspace      # no network needed
 ```
 
 Rust 1.95 or later.
+
+## Brand artwork
+
+Turul brand artwork is © 2026 Toast Technology Pty Ltd, all rights reserved,
+and is excluded from the software licence. See the [artwork notice](docs/assets/turul/ARTWORK-NOTICE.md) and [master assets](https://github.com/aussierobots/turul-brand).
+
+[Project icons and artwork](docs/assets/turul/README.md).
 
 ## Licence
 
