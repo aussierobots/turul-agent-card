@@ -4,8 +4,8 @@
 //! turul-ai-catalog-serve [--file PATH] [--addr HOST:PORT]
 //! ```
 //!
-//! Imports PATH into an in-memory catalog store (default: an empty store) and serves the assembled
-//! catalog at `/.well-known/ai-catalog.json` on `127.0.0.1:8080` by default. The catalog passes the
+//! Builds the served catalog from PATH (default: an empty catalog) with
+//! `ServedCatalog::from_document` and serves it at `/.well-known/ai-catalog.json` on `127.0.0.1:8080` by default. The catalog passes the
 //! same assembly gate as Lambda cold start, and every request is answered by the same `handle`.
 
 use std::net::SocketAddr;
@@ -16,9 +16,9 @@ use axum::extract::Request as AxumRequest;
 use axum::response::Response as AxumResponse;
 use lambda_http::Body;
 use turul_ai_catalog::identity::WELL_KNOWN_PATH;
+use turul_ai_catalog::model::AiCatalog;
 use turul_ai_catalog::parse::parse;
 use turul_ai_catalog_lambda::{ServedCatalog, handle};
-use turul_ai_catalog_storage::{CatalogId, InMemoryCatalogStore, import};
 
 const USAGE: &str = "usage: turul-ai-catalog-serve [--file PATH] [--addr HOST:PORT]";
 
@@ -31,29 +31,26 @@ async fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let store = InMemoryCatalogStore::new();
-    let catalog = CatalogId::new("default").expect("a valid catalog id");
-    if let Some(path) = &file {
-        let bytes = match std::fs::read(path) {
-            Ok(b) => b,
-            Err(e) => {
-                eprintln!("cannot read {path}: {e}");
-                return ExitCode::from(2);
+    let document = match &file {
+        None => AiCatalog::new(Vec::new()),
+        Some(path) => {
+            let bytes = match std::fs::read(path) {
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!("cannot read {path}: {e}");
+                    return ExitCode::from(2);
+                }
+            };
+            match parse(&bytes) {
+                Ok(d) => d,
+                Err(e) => {
+                    eprintln!("{path} does not parse: {e} at '{}'", e.pointer);
+                    return ExitCode::from(1);
+                }
             }
-        };
-        let document = match parse(&bytes) {
-            Ok(d) => d,
-            Err(e) => {
-                eprintln!("{path} does not parse: {e} at '{}'", e.pointer);
-                return ExitCode::from(1);
-            }
-        };
-        if let Err(e) = import(&store, &catalog, &document).await {
-            eprintln!("cannot load {path}: {}", turul_ai_catalog::error::chain(&e));
-            return ExitCode::from(1);
         }
-    }
-    let served: &'static ServedCatalog = match ServedCatalog::assemble(&store, &catalog).await {
+    };
+    let served: &'static ServedCatalog = match ServedCatalog::from_document(&document).await {
         Ok(s) => Box::leak(Box::new(s)),
         Err(e) => {
             eprintln!("{}", turul_ai_catalog::error::chain(&e));

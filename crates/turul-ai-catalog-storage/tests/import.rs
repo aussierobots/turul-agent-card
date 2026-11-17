@@ -68,3 +68,29 @@ fn unrecognized_top_level_members_are_refused() {
         })
     );
 }
+
+// #multi-version-entries: two entries with one entry key would collapse into one record; the
+// document is refused before anything is written.
+#[test]
+fn duplicate_entries_are_refused_and_nothing_is_written() {
+    let dup = r#"{"specVersion":"1.0","entries":[{"identifier":"urn:air:a","type":"t/x","url":"https://example.com/1"},{"identifier":"urn:air:a","type":"t/x","url":"https://example.com/2"}]}"#;
+    let doc = parse(dup.as_bytes()).unwrap();
+    let store = InMemoryCatalogStore::new();
+    let c = catalog("c");
+    match block_on(import(&store, &c, &doc)) {
+        Err(ImportError::Invalid { errors }) => {
+            assert!(
+                errors.iter().any(|e| e.contains("/entries/1")),
+                "{errors:?}"
+            )
+        }
+        other => panic!("expected Invalid, got {other:?}"),
+    }
+    assert!(
+        block_on(turul_ai_catalog_storage::CatalogStore::list_entries(
+            &store, &c
+        ))
+        .unwrap()
+        .is_empty()
+    );
+}

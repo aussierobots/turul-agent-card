@@ -19,6 +19,11 @@ pub enum ImportError {
         /// The JSON pointer of the member.
         pointer: String,
     },
+    /// The document has error diagnostics, each as `code at pointer`; nothing was written.
+    Invalid {
+        /// The error diagnostics, in document order.
+        errors: Vec<String>,
+    },
     /// A member failed the record gate.
     Record(RecordError),
     /// A write to the store failed.
@@ -30,6 +35,7 @@ impl fmt::Display for ImportError {
         match self {
             Self::Signed => f.write_str("a signed catalog cannot be stored"),
             Self::Unstorable { pointer } => write!(f, "the store cannot hold {pointer}"),
+            Self::Invalid { errors } => write!(f, "the document is invalid: {}", errors.join("; ")),
             Self::Record(e) => write!(f, "{e}"),
             Self::Store(e) => write!(f, "{e}"),
         }
@@ -49,6 +55,7 @@ impl std::error::Error for ImportError {}
 ///
 /// [`ImportError::Signed`] when the document carries a `signature` or `additionalSignatures`;
 /// [`ImportError::Unstorable`] when it has top-level members the store cannot hold;
+/// [`ImportError::Invalid`] when `validate` reports an error, before anything is written;
 /// [`ImportError::Record`] when the host or an entry fails the record gate;
 /// [`ImportError::Store`] when a write fails.
 ///
@@ -89,6 +96,19 @@ pub async fn import(
     if let Some((name, _)) = document.unrecognized.iter().next() {
         return Err(ImportError::Unstorable {
             pointer: root.child(name).to_string(),
+        });
+    }
+    // One validator: a document the spec rejects (e.g. two entries with one entry key, which
+    // would otherwise collapse into a single record) is refused before anything is written.
+    let report = turul_ai_catalog::validate::validate(document);
+    if report.has_errors() {
+        return Err(ImportError::Invalid {
+            errors: report
+                .diagnostics()
+                .iter()
+                .filter(|d| d.severity == turul_ai_catalog::validate::Severity::Error)
+                .map(|d| format!("{} at {}", d.code, d.path))
+                .collect(),
         });
     }
     let host = document

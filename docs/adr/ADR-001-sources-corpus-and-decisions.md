@@ -1,6 +1,6 @@
 # ADR-001: Sources, conformance corpus, declared level, maintainer decisions and SDK interop
 
-- **Status:** Proposed (S7 closes its scope; it stays Proposed until `sdk_interop` passes on CI)
+- **Status:** Accepted (2026-11-17): S7 closed its scope and `sdk_interop` passes in CI (`cargo test --workspace`, green on 0.0.19).
 - **Date:** 2026-11-17
 - **Implements:** `crates/turul-ai-catalog/tests/spec_examples.rs` (parse half, S1; round-trip half, S2, for ADR-003 law 1), `crates/turul-ai-catalog/tests/sdk_interop.rs` (S7), `crates/turul-ai-catalog/tests/common/spec_corpus.rs` (S7: the one corpus list and wrapping rules), `crates/turul-ai-catalog/tests/fixtures/interop/` (S7).
 - **Depends on:** ADR-002 (`parse`), ADR-003 (`to_canonical_vec`, the canonicalize law), ADR-005 and ADR-006 (`validate`, `Conformance`).
@@ -273,3 +273,4 @@ No derived artifact with golden bytes belongs to this ADR.
 | 2026-11-17 | S7: §8 SDK interop added. `=0.4.0` dev-dependencies on `ai-catalog`, `ai-catalog-validate`, `ai-catalog-trust` (D15). Accept/reject defined (§8.1). Interop corpus of 11 fixtures (§8.2). Per-file outcomes observed against 0.4.0 (§8.3): disagreements are RD-01, RD-02, RD-04, RD-08, RD-12, RD-13, RD-14, RD-15; blocks 12 and 16 are refused by both. Cross round-trip and canonicalize laws (§8.4), with RD-02 and RD-03 as the only theirs → ours inequalities; the RD-40 exclusion set is empty. Spec fixture list and wrapping rules move to `tests/common/spec_corpus.rs` (§8.5). |
 | 2026-11-17 | M20 (ADR-003 AMB-94): our writer is exactly RFC 8785, so RD-40 is closed: `serde_jcs` 0.2 also writes integers through `f64`, and both give the same bytes for every finite number. §6 drops RD-40; §8.4 law 3 excludes only numbers that are not finite doubles; `sdk_interop::numbers_canonicalise_as_ai_catalog_trust_does` added. |
 | 2026-11-17 | §7 M2 marked superseded in part by M19: the Lambda serves a store-assembled catalog, not a bundle (ADR-016). |
+| 2026-11-17 | Accepted: every test file named above exists, `sdk_interop` is not ignored or feature-gated and passes in CI's `cargo test --workspace` (green on 0.0.19). |

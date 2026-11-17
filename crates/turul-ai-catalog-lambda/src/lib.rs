@@ -8,8 +8,11 @@ use std::time::{Duration, Instant};
 use lambda_http::http::{Method, StatusCode, header};
 use lambda_http::{Body, Request, Response};
 use turul_ai_catalog::identity::{MEDIA_TYPE, WELL_KNOWN_PATH};
+use turul_ai_catalog::model::AiCatalog;
 use turul_ai_catalog::validate::Severity;
-use turul_ai_catalog_storage::{AssembleError, CatalogId, CatalogStore, assemble};
+use turul_ai_catalog_storage::{
+    AssembleError, CatalogId, CatalogStore, ImportError, InMemoryCatalogStore, assemble, import,
+};
 
 /// Value of the `Allow` header on a 405 response (RFC 9110 section 15.5.6).
 pub const ALLOW: &str = "GET, HEAD";
@@ -29,6 +32,8 @@ const DEFAULT_MAX_AGE: Duration = Duration::from_secs(60);
 pub enum ColdStartError {
     /// The store could not be read, or the assembled catalog is invalid or not canonicalisable.
     Assemble(AssembleError),
+    /// A carried document cannot be stored, e.g. it is signed or has catalog-level extensions.
+    Import(ImportError),
     /// An environment variable is missing or malformed; the message names it.
     Config(&'static str),
 }
@@ -48,6 +53,7 @@ impl fmt::Display for ColdStartError {
                 Ok(())
             }
             Self::Assemble(e) => write!(f, "cannot assemble the catalog: {e}"),
+            Self::Import(e) => write!(f, "cannot import the catalog: {e}"),
             Self::Config(message) => f.write_str(message),
         }
     }
@@ -161,6 +167,41 @@ impl ServedCatalog {
         Ok(Self {
             bytes: assembled.bytes,
         })
+    }
+
+    /// Builds the served catalog from a caller-supplied document: [`import`] into an in-memory
+    /// store, then [`ServedCatalog::assemble`]. Reads no file and adds nothing to the document, so
+    /// a function that compiles its catalog in and the local server share this one path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ColdStartError::Import`] when the document cannot be stored (for example it
+    /// carries a catalog `signature`), and [`ColdStartError::Assemble`] when the assembled
+    /// document has an error diagnostic.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use turul_ai_catalog::parse::parse;
+    /// use turul_ai_catalog_lambda::ServedCatalog;
+    ///
+    /// # futures::executor::block_on(async {
+    /// let document = parse(br#"{"specVersion":"1.0","entries":[{"identifier":"urn:air:example.com:mcp:weather","type":"application/mcp-server-card+json","url":"https://mcp.example.com/server-card.json"}]}"#)?;
+    /// let served = ServedCatalog::from_document(&document).await?;
+    /// # let _ = served;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// # })?;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub async fn from_document(document: &AiCatalog) -> Result<Self, ColdStartError> {
+        let store = InMemoryCatalogStore::new();
+        // A fixed, valid id: the store is private to this call, so the id is never observed.
+        let catalog =
+            CatalogId::new("default").map_err(|_| ColdStartError::Config("invalid catalog id"))?;
+        import(&store, &catalog, document)
+            .await
+            .map_err(ColdStartError::Import)?;
+        Self::assemble(&store, &catalog).await
     }
 }
 
