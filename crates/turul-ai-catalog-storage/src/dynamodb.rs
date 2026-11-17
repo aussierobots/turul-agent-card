@@ -1,18 +1,32 @@
 use async_trait::async_trait;
 use aws_sdk_dynamodb::Client;
 use aws_sdk_dynamodb::error::{DisplayErrorContext, ProvideErrorMetadata, SdkError};
+use aws_sdk_dynamodb::operation::transact_write_items::TransactWriteItemsError;
 use aws_sdk_dynamodb::primitives::Blob;
-use aws_sdk_dynamodb::types::AttributeValue;
+use aws_sdk_dynamodb::types::{
+    AttributeValue, ConditionCheck, Delete, Put, TransactWriteItem, Update,
+};
 use turul_ai_catalog::identity::EntryKey;
 
 use crate::ids::{CatalogId, Etag, RecordKey};
 use crate::records::{EntryRecord, HostRecord};
-use crate::store::{CatalogStore, Condition, StoreError, Stored, corrupt, key_error};
+use crate::store::{
+    CatalogStore, Condition, StoreError, Stored, corrupt, key_error, kind_conflict,
+};
 
 const ITEM_LIMIT: &str = "record exceeds the DynamoDB item size limit of 400 KB";
 
-/// Records in one DynamoDB table with partition key `pk` (S) and sort key `sk` (S). The table
-/// belongs to the deployer: the store neither creates nor verifies it.
+/// Guard item attributes: the identifier's version kind (BOOL) and its entry count (N).
+const VERSIONED: &str = "versioned";
+const ENTRIES: &str = "entries";
+
+const CONDITION_FAILED: &str = "ConditionalCheckFailed";
+const TRANSACTION_CONFLICT: &str = "TransactionConflict";
+
+/// Records in one DynamoDB table with partition key `pk` (S) and sort key `sk` (S). Beside each
+/// identifier's entry items sits a guard item (`sk` = `"g:…"`) holding its version kind and entry
+/// count; a new entry and its guard change in one transaction. The table belongs to the deployer:
+/// the store neither creates nor verifies it.
 pub struct DynamoDbCatalogStore {
     client: Client,
     table: String,
@@ -34,6 +48,33 @@ where
     E: ProvideErrorMetadata,
 {
     e.code() == Some("ConditionalCheckFailedException")
+}
+
+fn build_error(e: aws_sdk_dynamodb::error::BuildError) -> StoreError {
+    StoreError::Backend(e.to_string())
+}
+
+/// The code of each item's cancellation reason, in request order, and the reasons' messages.
+struct Cancelled {
+    codes: Vec<String>,
+    messages: Vec<String>,
+}
+
+impl Cancelled {
+    fn failed(&self, item: usize) -> bool {
+        self.codes.get(item).is_some_and(|c| c == CONDITION_FAILED)
+    }
+
+    fn conflicted(&self) -> bool {
+        self.codes.iter().any(|c| c == TRANSACTION_CONFLICT)
+    }
+
+    fn into_error(self) -> StoreError {
+        if self.messages.iter().any(|m| m.contains("Item size")) {
+            return StoreError::Backend(ITEM_LIMIT.to_string());
+        }
+        StoreError::Backend(format!("transaction cancelled: {}", self.codes.join(", ")))
+    }
 }
 
 fn s(value: &str) -> AttributeValue {
@@ -93,6 +134,99 @@ impl DynamoDbCatalogStore {
         }
     }
 
+    /// Replaces an existing entry item, with `expected` its required version. Fails
+    /// `PreconditionFailed` when the item is absent or its version differs.
+    async fn replace(
+        &self,
+        catalog: &CatalogId,
+        key: &RecordKey,
+        bytes: &[u8],
+        expected: Option<&Etag>,
+    ) -> Result<Etag, StoreError> {
+        let etag = Etag::of(bytes);
+        loop {
+            let request = self
+                .client
+                .put_item()
+                .table_name(&self.table)
+                .item("pk", s(catalog.as_str()))
+                .item("sk", s(key.as_str()))
+                .item("record", AttributeValue::B(Blob::new(bytes)))
+                .item("etag", s(etag.as_str()));
+            let request = match expected {
+                None => request.condition_expression("attribute_exists(pk)"),
+                Some(e) => request
+                    .condition_expression("etag = :e")
+                    .expression_attribute_values(":e", s(e.as_str())),
+            };
+            match request.send().await {
+                Ok(_) => return Ok(etag),
+                Err(e) if condition_failed(&e) => return Err(StoreError::PreconditionFailed),
+                // The item is inside another writer's transaction.
+                Err(e) if e.code() == Some("TransactionConflictException") => continue,
+                Err(e) => return Err(backend(e)),
+            }
+        }
+    }
+
+    /// Runs one transaction; `Some` when DynamoDB cancelled it.
+    async fn transact(
+        &self,
+        items: Vec<TransactWriteItem>,
+    ) -> Result<Option<Cancelled>, StoreError> {
+        match self
+            .client
+            .transact_write_items()
+            .set_transact_items(Some(items))
+            .send()
+            .await
+        {
+            Ok(_) => Ok(None),
+            Err(e) => match e.as_service_error() {
+                Some(TransactWriteItemsError::TransactionCanceledException(c)) => {
+                    let reasons = c.cancellation_reasons();
+                    Ok(Some(Cancelled {
+                        codes: reasons
+                            .iter()
+                            .map(|r| r.code().unwrap_or("None").to_string())
+                            .collect(),
+                        messages: reasons
+                            .iter()
+                            .filter_map(|r| r.message().map(str::to_string))
+                            .collect(),
+                    }))
+                }
+                _ => Err(backend(e)),
+            },
+        }
+    }
+
+    /// The entry count of a guard, read consistently; `None` when the guard is absent.
+    async fn guard_entries(
+        &self,
+        catalog: &CatalogId,
+        guard: &RecordKey,
+    ) -> Result<Option<String>, StoreError> {
+        let out = self
+            .client
+            .get_item()
+            .table_name(&self.table)
+            .key("pk", s(catalog.as_str()))
+            .key("sk", s(guard.as_str()))
+            .consistent_read(true)
+            .send()
+            .await
+            .map_err(backend)?;
+        out.item()
+            .map(|item| match item.get(ENTRIES) {
+                Some(AttributeValue::N(n)) => Ok(n.clone()),
+                _ => Err(StoreError::Backend(
+                    "guard item has no numeric `entries` attribute".to_string(),
+                )),
+            })
+            .transpose()
+    }
+
     async fn get(
         &self,
         catalog: &CatalogId,
@@ -131,7 +265,64 @@ impl CatalogStore for DynamoDbCatalogStore {
         condition: Condition,
     ) -> Result<Etag, StoreError> {
         let key = record.record_key().map_err(key_error)?;
-        self.put(catalog, &key, record.bytes(), condition).await
+        if let Condition::Matches(expected) = &condition {
+            return self
+                .replace(catalog, &key, record.bytes(), Some(expected))
+                .await;
+        }
+        let guard = RecordKey::guard(&record.entry().identifier).map_err(key_error)?;
+        let etag = Etag::of(record.bytes());
+        loop {
+            let create = Put::builder()
+                .table_name(&self.table)
+                .item("pk", s(catalog.as_str()))
+                .item("sk", s(key.as_str()))
+                .item("record", AttributeValue::B(Blob::new(record.bytes())))
+                .item("etag", s(etag.as_str()))
+                .condition_expression("attribute_not_exists(pk)")
+                .build()
+                .map_err(build_error)?;
+            // A new entry is refused when its identifier's guard holds the other version kind.
+            let count = Update::builder()
+                .table_name(&self.table)
+                .key("pk", s(catalog.as_str()))
+                .key("sk", s(guard.as_str()))
+                .update_expression("SET #v = :v ADD #n :one")
+                .condition_expression("attribute_not_exists(pk) OR #v = :v")
+                .expression_attribute_names("#v", VERSIONED)
+                .expression_attribute_names("#n", ENTRIES)
+                .expression_attribute_values(
+                    ":v",
+                    AttributeValue::Bool(record.entry().version.is_some()),
+                )
+                .expression_attribute_values(":one", AttributeValue::N("1".to_string()))
+                .build()
+                .map_err(build_error)?;
+            let items = vec![
+                TransactWriteItem::builder().put(create).build(),
+                TransactWriteItem::builder().update(count).build(),
+            ];
+            let Some(cancelled) = self.transact(items).await? else {
+                return Ok(etag);
+            };
+            if cancelled.failed(0) {
+                if condition == Condition::Absent {
+                    return Err(StoreError::PreconditionFailed);
+                }
+                // `Any` on an existing entry is a replace, which leaves the kinds unchanged; an
+                // entry deleted meanwhile is created on the next attempt.
+                match self.replace(catalog, &key, record.bytes(), None).await {
+                    Err(StoreError::PreconditionFailed) => continue,
+                    done => return done,
+                }
+            }
+            if cancelled.failed(1) {
+                return Err(kind_conflict(record));
+            }
+            if !cancelled.conflicted() {
+                return Err(cancelled.into_error());
+            }
+        }
     }
 
     async fn get_entry(
@@ -154,25 +345,82 @@ impl CatalogStore for DynamoDbCatalogStore {
         expected: Option<&Etag>,
     ) -> Result<(), StoreError> {
         let record_key = RecordKey::entry(key).map_err(key_error)?;
-        let mut request = self
-            .client
-            .delete_item()
-            .table_name(&self.table)
-            .key("pk", s(catalog.as_str()))
-            .key("sk", s(record_key.as_str()));
-        request = match expected {
-            None => request.condition_expression("attribute_exists(pk)"),
-            Some(etag) => request
-                .condition_expression("etag = :e")
-                .expression_attribute_values(":e", s(etag.as_str())),
-        };
-        match request.send().await {
-            Ok(_) => Ok(()),
-            Err(e) if condition_failed(&e) => Err(match expected {
-                None => StoreError::NotFound,
-                Some(_) => StoreError::PreconditionFailed,
-            }),
-            Err(e) => Err(backend(e)),
+        let guard = RecordKey::guard(key.identifier()).map_err(key_error)?;
+        loop {
+            let remove = Delete::builder()
+                .table_name(&self.table)
+                .key("pk", s(catalog.as_str()))
+                .key("sk", s(record_key.as_str()));
+            let remove = match expected {
+                None => remove.condition_expression("attribute_exists(pk)"),
+                Some(etag) => remove
+                    .condition_expression("etag = :e")
+                    .expression_attribute_values(":e", s(etag.as_str())),
+            }
+            .build()
+            .map_err(build_error)?;
+            // The guard changes only if it still holds the count read here; otherwise retry.
+            let guard_item = match self.guard_entries(catalog, &guard).await? {
+                // A record stored without a guard was never counted.
+                None => TransactWriteItem::builder()
+                    .condition_check(
+                        ConditionCheck::builder()
+                            .table_name(&self.table)
+                            .key("pk", s(catalog.as_str()))
+                            .key("sk", s(guard.as_str()))
+                            .condition_expression("attribute_not_exists(pk)")
+                            .build()
+                            .map_err(build_error)?,
+                    )
+                    .build(),
+                Some(n) if n == "1" => TransactWriteItem::builder()
+                    .delete(
+                        Delete::builder()
+                            .table_name(&self.table)
+                            .key("pk", s(catalog.as_str()))
+                            .key("sk", s(guard.as_str()))
+                            .condition_expression("#n = :n")
+                            .expression_attribute_names("#n", ENTRIES)
+                            .expression_attribute_values(":n", AttributeValue::N(n))
+                            .build()
+                            .map_err(build_error)?,
+                    )
+                    .build(),
+                Some(n) => TransactWriteItem::builder()
+                    .update(
+                        Update::builder()
+                            .table_name(&self.table)
+                            .key("pk", s(catalog.as_str()))
+                            .key("sk", s(guard.as_str()))
+                            .update_expression("ADD #n :minus")
+                            .condition_expression("#n = :n")
+                            .expression_attribute_names("#n", ENTRIES)
+                            .expression_attribute_values(":n", AttributeValue::N(n))
+                            .expression_attribute_values(
+                                ":minus",
+                                AttributeValue::N("-1".to_string()),
+                            )
+                            .build()
+                            .map_err(build_error)?,
+                    )
+                    .build(),
+            };
+            let items = vec![
+                TransactWriteItem::builder().delete(remove).build(),
+                guard_item,
+            ];
+            let Some(cancelled) = self.transact(items).await? else {
+                return Ok(());
+            };
+            if cancelled.failed(0) {
+                return Err(match expected {
+                    None => StoreError::NotFound,
+                    Some(_) => StoreError::PreconditionFailed,
+                });
+            }
+            if !cancelled.failed(1) && !cancelled.conflicted() {
+                return Err(cancelled.into_error());
+            }
         }
     }
 

@@ -5,6 +5,27 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.0.18] - 2026-11-17
+
+### Added
+
+- `StoreError::VersionKindConflict { identifier }`, returned by `put_entry`.
+- `RecordKey::guard`: the backend key of an identifier's version-kind guard, `"g:"` and a fixed-length digest. See ADR-016.
+
+### Fixed
+
+- `CatalogStore::put_entry` now enforces the #multi-version-entries rule that an unversioned entry's `identifier` alone is unique. It refuses a new entry whose identifier already has stored entries of the other version kind (unversioned beside versioned, or the reverse) with `VersionKindConflict`. Every backend makes the check and the write one atomic step, so concurrent writers cannot both pass: in-memory under its lock, sqlite and postgres in one transaction holding a per-identifier guard row, DynamoDB in one `TransactWriteItems` with a per-identifier guard item. Deleting the last entry of a kind frees the identifier for the other kind. One accepted put can no longer stop every Lambda instance from serving the catalog. See ADR-016.
+- `import` of a document that has both kinds for one identifier now fails with `ImportError::Store(VersionKindConflict)` at the second entry, instead of storing a catalog that cannot be assembled.
+
+### Compatibility
+
+- sqlite and postgres: `connect` creates a second table, `catalog_guards`, when missing; a postgres role needs the same privilege for it as for `catalog_records`, or the table pre-created. DynamoDB: no table change; guard items share the table (`sk` = `"g:…"`). Writers need `dynamodb:UpdateItem`, `dynamodb:ConditionCheckItem` and `dynamodb:GetItem` beside `PutItem` and `DeleteItem`; the serving role is unchanged.
+- Stores written by 0.0.17 hold no guards, so `put_entry` cannot see the version kind of their records, and a conflict they already hold stays. Re-run `import` (or the registering writers) into an empty catalog or table to get the guarantee. Assembly still validates the whole document, so such a store keeps failing assembly rather than serving an invalid catalog.
+
+### Verification
+
+- The parity suite runs the new checks on in-memory, sqlite and DynamoDB Local, including writers racing an unversioned entry against versioned ones; fmt, clippy `-D warnings`, test and `cargo doc` pass.
+
 ## [0.0.17] - 2026-11-17
 
 ### Added

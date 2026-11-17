@@ -8,7 +8,7 @@ license.workspace = true
 repository.workspace = true
 keywords.workspace = true
 rust-version.workspace = true
-publish = false
+publish = true
 
 [dependencies]
 turul-ai-catalog = { workspace = true }

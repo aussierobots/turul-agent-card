@@ -4,7 +4,7 @@ mod support;
 
 use async_trait::async_trait;
 use futures::executor::block_on;
-use support::{body_bytes, catalog_id, request, served_from, store_with};
+use support::{body_bytes, catalog_id, request, served_from};
 use turul_ai_catalog::identity::{EntryKey, WELL_KNOWN_PATH};
 use turul_ai_catalog::parse::parse;
 use turul_ai_catalog::validate::{Conformance, Severity, validate};
@@ -86,6 +86,75 @@ impl CatalogStore for Unreachable {
     }
 }
 
+/// A store holding `urn:example:a` both unversioned and versioned, as one written before
+/// `put_entry` refused other-kind entries can.
+struct WrittenBeforeTheGuard(Vec<EntryRecord>);
+
+fn written_before_the_guard() -> WrittenBeforeTheGuard {
+    let entry = |document: &str| {
+        let entry = parse(document.as_bytes())
+            .expect("parses")
+            .entries
+            .remove(0);
+        EntryRecord::new(entry).expect("entry passes the record gate")
+    };
+    WrittenBeforeTheGuard(vec![
+        entry(&doc(&ENTRY.replace("}", r#","version":"1"}"#))),
+        entry(&doc(ENTRY)),
+    ])
+}
+
+#[async_trait]
+impl CatalogStore for WrittenBeforeTheGuard {
+    fn backend_name(&self) -> &'static str {
+        "written-before-the-guard"
+    }
+    async fn put_entry(
+        &self,
+        _: &CatalogId,
+        _: &EntryRecord,
+        _: Condition,
+    ) -> Result<Etag, StoreError> {
+        unreachable!()
+    }
+    async fn get_entry(
+        &self,
+        _: &CatalogId,
+        _: &EntryKey,
+    ) -> Result<Option<Stored<EntryRecord>>, StoreError> {
+        unreachable!()
+    }
+    async fn delete_entry(
+        &self,
+        _: &CatalogId,
+        _: &EntryKey,
+        _: Option<&Etag>,
+    ) -> Result<(), StoreError> {
+        unreachable!()
+    }
+    async fn list_entries(&self, _: &CatalogId) -> Result<Vec<Stored<EntryRecord>>, StoreError> {
+        Ok(self
+            .0
+            .iter()
+            .map(|r| Stored {
+                record: r.clone(),
+                etag: Etag::of(r.bytes()),
+            })
+            .collect())
+    }
+    async fn put_host(
+        &self,
+        _: &CatalogId,
+        _: &HostRecord,
+        _: Condition,
+    ) -> Result<Etag, StoreError> {
+        unreachable!()
+    }
+    async fn get_host(&self, _: &CatalogId) -> Result<Option<Stored<HostRecord>>, StoreError> {
+        Ok(None)
+    }
+}
+
 // #top-level-structure: `entries` "MAY be empty", so an empty store is a valid catalog.
 #[test]
 fn empty_store_serves_a_valid_empty_catalog() {
@@ -98,23 +167,14 @@ fn empty_store_serves_a_valid_empty_catalog() {
     assert_eq!(body_bytes(&r), br#"{"entries":[],"specVersion":"1.0"}"#);
 }
 
-// #multi-version-entries: an unversioned entry beside a versioned one breaks uniqueness, which only
-// the whole document shows.
+// #multi-version-entries: an unversioned entry beside a versioned one breaks uniqueness. Every
+// backend refuses such a put, so the records come from a store written before it did.
 #[test]
 fn invalid_store_fails_cold_start() {
-    let a = doc(&ENTRY.replace("}", r#","version":"1"}"#));
-    let store = store_with(&a);
-    let unversioned: turul_ai_catalog::model::CatalogEntry = parse(doc(ENTRY).as_bytes())
-        .expect("parses")
-        .entries
-        .remove(0);
-    block_on(store.put_entry(
+    match block_on(ServedCatalog::assemble(
+        &written_before_the_guard(),
         &catalog_id(),
-        &EntryRecord::new(unversioned).expect("entry passes the record gate"),
-        Condition::Any,
-    ))
-    .expect("put");
-    match block_on(ServedCatalog::assemble(&store, &catalog_id())) {
+    )) {
         Err(ColdStartError::Assemble(AssembleError::Invalid(report))) => {
             assert!(report.has_errors())
         }
@@ -130,17 +190,7 @@ fn invalid_store_fails_cold_start() {
 
 #[test]
 fn cold_start_error_names_each_error_code_and_pointer() {
-    let store = store_with(&doc(&ENTRY.replace("}", r#","version":"1"}"#)));
-    let unversioned = parse(doc(ENTRY).as_bytes())
-        .expect("parses")
-        .entries
-        .remove(0);
-    block_on(store.put_entry(
-        &catalog_id(),
-        &EntryRecord::new(unversioned).expect("record"),
-        Condition::Any,
-    ))
-    .expect("put");
+    let store = written_before_the_guard();
     let Err(err) = block_on(ServedCatalog::assemble(&store, &catalog_id())) else {
         panic!("must fail cold start");
     };

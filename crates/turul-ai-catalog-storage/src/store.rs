@@ -1,7 +1,7 @@
 use std::fmt;
 
 use async_trait::async_trait;
-use turul_ai_catalog::identity::EntryKey;
+use turul_ai_catalog::identity::{EntryIdentifier, EntryKey};
 use turul_ai_catalog::parse::ParseError;
 
 use crate::ids::{CatalogId, Etag, RecordKey};
@@ -31,6 +31,10 @@ pub enum StoreError {
     PreconditionFailed,
     /// A delete of a missing record with no expected version.
     NotFound,
+    /// The entry's identifier already has stored entries of the other version kind: an
+    /// unversioned entry beside versioned ones, or the reverse (#multi-version-entries: "When
+    /// `version` is absent, `identifier` alone MUST be unique").
+    VersionKindConflict { identifier: EntryIdentifier },
     /// A stored record that does not parse.
     Corrupt { key: RecordKey, error: ParseError },
     /// The backend's own error, as text.
@@ -42,6 +46,11 @@ impl fmt::Display for StoreError {
         match self {
             Self::PreconditionFailed => f.write_str("precondition failed"),
             Self::NotFound => f.write_str("record not found"),
+            Self::VersionKindConflict { identifier } => write!(
+                f,
+                "{} already has stored entries of the other version kind",
+                identifier.as_str()
+            ),
             Self::Corrupt { key, error } => write!(f, "corrupt record {key}: {error}"),
             Self::Backend(m) => write!(f, "backend error: {m}"),
         }
@@ -53,12 +62,16 @@ impl std::error::Error for StoreError {}
 /// Entry-level catalog records with ETag versions. Every backend guarantees: atomic conditional
 /// writes; read-your-writes; reads return exactly the bytes written (`etag == Etag::of(bytes)`);
 /// `list_entries` returns every committed entry record once, in no defined order; no operation
-/// touches another [`CatalogId`]; at most one entry record per [`RecordKey`]. `list_entries` and
-/// `get_host` are not one snapshot.
+/// touches another [`CatalogId`]; at most one entry record per [`RecordKey`]; no identifier with
+/// both unversioned and versioned entry records. `list_entries` and `get_host` are not one
+/// snapshot.
 #[async_trait]
 pub trait CatalogStore: Send + Sync {
     fn backend_name(&self) -> &'static str;
 
+    /// Fails `PreconditionFailed` when `condition` does not hold, then `VersionKindConflict` when
+    /// the record is new and its identifier already has entries of the other version kind. The
+    /// check and the write are one atomic step.
     async fn put_entry(
         &self,
         catalog: &CatalogId,
@@ -99,6 +112,12 @@ pub trait CatalogStore: Send + Sync {
 
 pub(crate) fn key_error(e: crate::RecordError) -> StoreError {
     StoreError::Backend(e.to_string())
+}
+
+pub(crate) fn kind_conflict(record: &EntryRecord) -> StoreError {
+    StoreError::VersionKindConflict {
+        identifier: record.entry().identifier.clone(),
+    }
 }
 
 pub(crate) fn corrupt(key: &RecordKey, error: turul_ai_catalog::parse::ParseError) -> StoreError {

@@ -6,6 +6,7 @@
 use std::sync::Arc;
 
 use futures::future::join_all;
+use turul_ai_catalog::identity::EntryIdentifier;
 use turul_ai_catalog::json::Json;
 use turul_ai_catalog::model::{ArtifactSource, Members};
 use turul_ai_catalog::parse::parse_entry;
@@ -302,4 +303,226 @@ pub async fn recreated_identical_record_has_the_same_etag(store: &dyn CatalogSto
         .unwrap();
     let second = store.put_entry(&c, &r, Condition::Absent).await.unwrap();
     assert_eq!(first, second);
+}
+
+fn kind_conflict(identifier: &str) -> Result<Etag, StoreError> {
+    Err(StoreError::VersionKindConflict {
+        identifier: EntryIdentifier::new(identifier),
+    })
+}
+
+/// The identifiers, as `(identifier, version)`, of every stored entry.
+async fn stored_keys(
+    store: &dyn CatalogStore,
+    c: &turul_ai_catalog_storage::CatalogId,
+) -> Vec<(String, Option<String>)> {
+    let mut keys: Vec<_> = store
+        .list_entries(c)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|s| {
+            let e = s.record.into_entry();
+            (e.identifier.as_str().to_string(), e.version)
+        })
+        .collect();
+    keys.sort();
+    keys
+}
+
+// #multi-version-entries: "When `version` is absent, `identifier` alone MUST be unique", so an
+// unversioned entry is refused beside versioned ones of its identifier.
+pub async fn unversioned_entry_beside_versioned_ones_is_refused(store: &dyn CatalogStore) {
+    let c = id("unversioned-entry-beside-versioned-ones-is-refused");
+    store
+        .put_entry(&c, &record("urn:air:a", Some("1")), Condition::Absent)
+        .await
+        .unwrap();
+    for condition in [Condition::Any, Condition::Absent] {
+        assert_eq!(
+            store
+                .put_entry(&c, &record("urn:air:a", None), condition)
+                .await,
+            kind_conflict("urn:air:a")
+        );
+    }
+    assert_eq!(
+        stored_keys(store, &c).await,
+        [("urn:air:a".to_string(), Some("1".to_string()))]
+    );
+    assert!(assemble(store, &c).await.is_ok());
+}
+
+// #multi-version-entries: the reverse direction; an empty `version` is a present version.
+pub async fn versioned_entry_beside_an_unversioned_one_is_refused(store: &dyn CatalogStore) {
+    let c = id("versioned-entry-beside-an-unversioned-one-is-refused");
+    store
+        .put_entry(&c, &record("urn:air:a", None), Condition::Absent)
+        .await
+        .unwrap();
+    for version in ["1", ""] {
+        for condition in [Condition::Any, Condition::Absent] {
+            assert_eq!(
+                store
+                    .put_entry(&c, &record("urn:air:a", Some(version)), condition)
+                    .await,
+                kind_conflict("urn:air:a")
+            );
+        }
+    }
+    assert_eq!(
+        stored_keys(store, &c).await,
+        [("urn:air:a".to_string(), None)]
+    );
+    assert!(assemble(store, &c).await.is_ok());
+}
+
+pub async fn same_version_kind_puts_are_accepted(store: &dyn CatalogStore) {
+    let c = id("same-version-kind-puts-are-accepted");
+    for version in ["1", "2", ""] {
+        store
+            .put_entry(&c, &record("urn:air:a", Some(version)), Condition::Absent)
+            .await
+            .unwrap();
+    }
+    let b = record("urn:air:b", None);
+    let first = store.put_entry(&c, &b, Condition::Absent).await.unwrap();
+    store.put_entry(&c, &b, Condition::Any).await.unwrap();
+    store
+        .put_entry(&c, &b, Condition::Matches(first))
+        .await
+        .unwrap();
+    store
+        .put_entry(&c, &record("urn:air:c", Some("1")), Condition::Any)
+        .await
+        .unwrap();
+    assert_eq!(store.list_entries(&c).await.unwrap().len(), 5);
+    assert!(assemble(store, &c).await.is_ok());
+}
+
+pub async fn deleting_the_last_record_of_a_kind_frees_the_identifier(store: &dyn CatalogStore) {
+    let c = id("deleting-the-last-record-of-a-kind-frees-the-identifier");
+    let (a, a1, a2) = (
+        record("urn:air:a", None),
+        record("urn:air:a", Some("1")),
+        record("urn:air:a", Some("2")),
+    );
+    store.put_entry(&c, &a1, Condition::Absent).await.unwrap();
+    let a2_etag = store.put_entry(&c, &a2, Condition::Absent).await.unwrap();
+    store.delete_entry(&c, &a1.key(), None).await.unwrap();
+    assert_eq!(
+        store.put_entry(&c, &a, Condition::Any).await,
+        kind_conflict("urn:air:a")
+    );
+    // A refused delete leaves the identifier's kind in place.
+    assert_eq!(
+        store
+            .delete_entry(&c, &a2.key(), Some(&Etag::of(b"other")))
+            .await,
+        Err(StoreError::PreconditionFailed)
+    );
+    assert_eq!(
+        store.delete_entry(&c, &a1.key(), None).await,
+        Err(StoreError::NotFound)
+    );
+    assert_eq!(
+        store.put_entry(&c, &a, Condition::Any).await,
+        kind_conflict("urn:air:a")
+    );
+    store
+        .delete_entry(&c, &a2.key(), Some(&a2_etag))
+        .await
+        .unwrap();
+    store.put_entry(&c, &a, Condition::Absent).await.unwrap();
+    assert_eq!(
+        store.put_entry(&c, &a1, Condition::Any).await,
+        kind_conflict("urn:air:a")
+    );
+    store.delete_entry(&c, &a.key(), None).await.unwrap();
+    store.put_entry(&c, &a1, Condition::Absent).await.unwrap();
+    assert_eq!(
+        stored_keys(store, &c).await,
+        [("urn:air:a".to_string(), Some("1".to_string()))]
+    );
+}
+
+// A precondition is decided before the version kind: only a new record can conflict.
+pub async fn conditional_puts_keep_their_preconditions(store: &dyn CatalogStore) {
+    let c = id("conditional-puts-keep-their-preconditions");
+    let mut e = entry("urn:air:a", Some("1"));
+    let first = store
+        .put_entry(
+            &c,
+            &turul_ai_catalog_storage::EntryRecord::new(e.clone()).unwrap(),
+            Condition::Absent,
+        )
+        .await
+        .unwrap();
+    e.description = Some("changed".to_string());
+    let changed = turul_ai_catalog_storage::EntryRecord::new(e).unwrap();
+    assert_eq!(
+        store.put_entry(&c, &changed, Condition::Absent).await,
+        Err(StoreError::PreconditionFailed)
+    );
+    assert_eq!(
+        store
+            .put_entry(&c, &changed, Condition::Matches(Etag::of(b"other")))
+            .await,
+        Err(StoreError::PreconditionFailed)
+    );
+    let second = store
+        .put_entry(&c, &changed, Condition::Matches(first.clone()))
+        .await
+        .unwrap();
+    assert_eq!(second, Etag::of(changed.bytes()));
+    let unversioned = record("urn:air:a", None);
+    assert_eq!(
+        store
+            .put_entry(&c, &unversioned, Condition::Matches(second))
+            .await,
+        Err(StoreError::PreconditionFailed)
+    );
+    assert_eq!(
+        store.put_entry(&c, &unversioned, Condition::Absent).await,
+        kind_conflict("urn:air:a")
+    );
+    let got = store.get_entry(&c, &changed.key()).await.unwrap().unwrap();
+    assert_eq!(got.record.bytes(), changed.bytes());
+}
+
+/// Writers racing an unversioned `urn:air:a` against versioned ones leave entries of one kind.
+pub async fn racing_version_kinds_leave_one_kind(store: Arc<dyn CatalogStore>) {
+    const WRITERS: usize = 16;
+    for round in 0..4 {
+        let c = id(&format!("racing-version-kinds-leave-one-kind.{round}"));
+        let puts = (0..WRITERS).map(|i| {
+            let store = Arc::clone(&store);
+            let c = c.clone();
+            // Alternate kinds; which kind starts changes per round.
+            let versioned = (i + round) % 2 == 1;
+            async move {
+                let mut e = entry("urn:air:a", versioned.then(|| i.to_string()).as_deref());
+                e.description = Some(format!("writer {i}"));
+                let r = turul_ai_catalog_storage::EntryRecord::new(e).unwrap();
+                (versioned, store.put_entry(&c, &r, Condition::Any).await)
+            }
+        });
+        let results = join_all(puts).await;
+        let keys = stored_keys(store.as_ref(), &c).await;
+        let versioned_won = keys[0].1.is_some();
+        assert!(
+            keys.iter().all(|(_, v)| v.is_some() == versioned_won),
+            "{keys:?}"
+        );
+        for (versioned, result) in &results {
+            if *versioned == versioned_won {
+                assert!(result.is_ok(), "{result:?}");
+            } else {
+                assert_eq!(result, &kind_conflict("urn:air:a"));
+            }
+        }
+        let winners = results.iter().filter(|(v, _)| *v == versioned_won).count();
+        assert_eq!(keys.len(), if versioned_won { winners } else { 1 });
+        assert!(assemble(store.as_ref(), &c).await.is_ok());
+    }
 }

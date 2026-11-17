@@ -253,6 +253,11 @@ parity_checks!(
     same_state_assembles_to_the_same_bytes,
     etag_is_the_digest_of_the_record_bytes,
     recreated_identical_record_has_the_same_etag,
+    unversioned_entry_beside_versioned_ones_is_refused,
+    versioned_entry_beside_an_unversioned_one_is_refused,
+    same_version_kind_puts_are_accepted,
+    deleting_the_last_record_of_a_kind_frees_the_identifier,
+    conditional_puts_keep_their_preconditions,
 );
 
 #[tokio::test]
@@ -263,6 +268,16 @@ async fn concurrent_absent_puts_have_one_winner() {
     };
     let shared: Arc<dyn CatalogStore> = Arc::new(env.store());
     parity::concurrent_absent_puts_have_one_winner(shared).await;
+}
+
+#[tokio::test]
+#[ignore = "needs DynamoDB Local"]
+async fn racing_version_kinds_leave_one_kind() {
+    let Some(env) = Env::start("racing_version_kinds_leave_one_kind").await else {
+        return;
+    };
+    let shared: Arc<dyn CatalogStore> = Arc::new(env.store());
+    parity::racing_version_kinds_leave_one_kind(shared).await;
 }
 
 #[tokio::test]

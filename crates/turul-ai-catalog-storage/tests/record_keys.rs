@@ -61,3 +61,18 @@ fn extensions_do_not_change_the_record_key() {
         RecordKey::entry(&extended.key()).unwrap()
     );
 }
+
+#[test]
+fn guard_keys_are_one_per_identifier_and_never_an_entry_or_host_key() {
+    let guard = |identifier: &str| RecordKey::guard(&EntryIdentifier::new(identifier)).unwrap();
+    assert_eq!(guard("urn:air:a"), guard("urn:air:a"));
+    assert_ne!(guard("urn:air:a"), guard("urn:air:b"));
+    assert!(guard("urn:air:a").as_str().starts_with("g:"));
+    assert_eq!(guard(&"x".repeat(5000)).as_str().len(), 66);
+    assert!(!guard("urn:air:a").is_entry());
+    assert_ne!(guard("urn:air:a"), RecordKey::HOST);
+    for version in [None, Some(""), Some("1")] {
+        let entry = key("urn:air:a", version);
+        assert_ne!(&guard("urn:air:a").as_str()[2..], &entry.as_str()[2..]);
+    }
+}

@@ -3,6 +3,7 @@
 
 mod support;
 
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -25,10 +26,12 @@ fn second_entry() -> EntryRecord {
     EntryRecord::new(entry).expect("record")
 }
 
-/// An in-memory store that can be made to fail every read.
+/// An in-memory store that can be made to fail every read, or to list beside its own records one
+/// that its `put_entry` refuses, as a store written before that refusal can.
 struct Switch {
     inner: InMemoryCatalogStore,
     down: AtomicBool,
+    written_before_the_guard: Mutex<Option<EntryRecord>>,
 }
 
 impl Switch {
@@ -71,7 +74,14 @@ impl CatalogStore for Switch {
     }
     async fn list_entries(&self, c: &CatalogId) -> Result<Vec<Stored<EntryRecord>>, StoreError> {
         self.check()?;
-        self.inner.list_entries(c).await
+        let mut stored = self.inner.list_entries(c).await?;
+        if let Some(record) = self.written_before_the_guard.lock().expect("lock").clone() {
+            stored.push(Stored {
+                etag: Etag::of(record.bytes()),
+                record,
+            });
+        }
+        Ok(stored)
     }
     async fn put_host(
         &self,
@@ -91,6 +101,7 @@ fn setup(max_age: Duration) -> (Switch, SnapshotCache) {
     let store = Switch {
         inner: store_with(ONE),
         down: AtomicBool::new(false),
+        written_before_the_guard: Mutex::new(None),
     };
     let served = block_on(ServedCatalog::assemble(&store, &catalog_id())).expect("assembles");
     (store, SnapshotCache::new(served, max_age))
@@ -149,8 +160,9 @@ fn failed_reassembly_keeps_the_last_good_snapshot() {
 }
 
 // #multi-version-entries: a versioned `urn:example:a` beside the stored unversioned one breaks
-// "`identifier` alone MUST be unique". The store accepts the record; the refresh fails, keeps the
-// last good snapshot and reports why.
+// "`identifier` alone MUST be unique". The store refuses that put, so the record is listed as a store
+// written before the refusal lists it; the refresh fails, keeps the last good snapshot and reports
+// why.
 #[test]
 fn cross_entry_error_keeps_the_last_good_snapshot_and_is_reported() {
     let (store, cache) = setup(Duration::ZERO);
@@ -158,12 +170,12 @@ fn cross_entry_error_keeps_the_last_good_snapshot_and_is_reported() {
     let mut doc = turul_ai_catalog::parse::parse(ONE.as_bytes()).expect("parses");
     let mut versioned = doc.entries.remove(0);
     versioned.version = Some("1".to_string());
-    block_on(store.put_entry(
-        &catalog_id(),
-        &EntryRecord::new(versioned).expect("entry passes the record gate"),
-        Condition::Absent,
-    ))
-    .expect("the store accepts the record");
+    let versioned = EntryRecord::new(versioned).expect("entry passes the record gate");
+    assert!(matches!(
+        block_on(store.put_entry(&catalog_id(), &versioned, Condition::Absent)),
+        Err(StoreError::VersionKindConflict { .. })
+    ));
+    *store.written_before_the_guard.lock().expect("lock") = Some(versioned);
     let (during, error) = block_on(cache.current(&store, &catalog_id()));
     assert_eq!(before, body(&during));
     assert!(matches!(

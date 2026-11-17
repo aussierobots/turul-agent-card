@@ -1,9 +1,14 @@
 mod common;
 
+use async_trait::async_trait;
 use common::*;
 use futures::executor::block_on;
+use turul_ai_catalog::identity::EntryKey;
 use turul_ai_catalog::parse::parse;
-use turul_ai_catalog_storage::{CatalogStore, Condition, InMemoryCatalogStore, assemble};
+use turul_ai_catalog_storage::{
+    AssembleError, CatalogId, CatalogStore, Condition, EntryRecord, Etag, HostRecord,
+    InMemoryCatalogStore, StoreError, Stored, assemble,
+};
 
 #[test]
 fn empty_store_assembles_to_a_valid_empty_catalog() {
@@ -61,16 +66,74 @@ fn absent_version_orders_before_present_versions() {
     assert!(entry("a", Some("9")).key() < entry("b", None).key());
 }
 
-// #multi-version-entries: with `version` absent, "`identifier` alone MUST be unique". Each record
-// passes the gate alone and the store accepts both; only the assembled whole fails.
+/// A store whose records were written before `put_entry` refused other-kind entries: it lists
+/// whatever it was given.
+struct Listed(Vec<EntryRecord>);
+
+#[async_trait]
+impl CatalogStore for Listed {
+    fn backend_name(&self) -> &'static str {
+        "listed"
+    }
+    async fn put_entry(
+        &self,
+        _: &CatalogId,
+        _: &EntryRecord,
+        _: Condition,
+    ) -> Result<Etag, StoreError> {
+        unreachable!()
+    }
+    async fn get_entry(
+        &self,
+        _: &CatalogId,
+        _: &EntryKey,
+    ) -> Result<Option<Stored<EntryRecord>>, StoreError> {
+        unreachable!()
+    }
+    async fn delete_entry(
+        &self,
+        _: &CatalogId,
+        _: &EntryKey,
+        _: Option<&Etag>,
+    ) -> Result<(), StoreError> {
+        unreachable!()
+    }
+    async fn list_entries(&self, _: &CatalogId) -> Result<Vec<Stored<EntryRecord>>, StoreError> {
+        Ok(self
+            .0
+            .iter()
+            .map(|r| Stored {
+                record: r.clone(),
+                etag: Etag::of(r.bytes()),
+            })
+            .collect())
+    }
+    async fn put_host(
+        &self,
+        _: &CatalogId,
+        _: &HostRecord,
+        _: Condition,
+    ) -> Result<Etag, StoreError> {
+        unreachable!()
+    }
+    async fn get_host(&self, _: &CatalogId) -> Result<Option<Stored<HostRecord>>, StoreError> {
+        Ok(None)
+    }
+}
+
+// #multi-version-entries: with `version` absent, "`identifier` alone MUST be unique". Every
+// backend refuses the second put, but records stored before it did so still reach assembly, whose
+// whole-document validation refuses them.
 #[test]
-fn a_cross_entry_error_fails_assembly() {
-    let store = InMemoryCatalogStore::new();
-    let c = catalog("c");
-    block_on(store.put_entry(&c, &record("a", None), Condition::Any)).unwrap();
-    block_on(store.put_entry(&c, &record("a", Some("1")), Condition::Any)).unwrap();
-    assert!(matches!(
-        block_on(assemble(&store, &c)),
-        Err(turul_ai_catalog_storage::AssembleError::Invalid(_))
-    ));
+fn records_breaking_identifier_uniqueness_fail_assembly() {
+    let store = Listed(vec![record("a", None), record("a", Some("1"))]);
+    let Err(AssembleError::Invalid(report)) = block_on(assemble(&store, &catalog("c"))) else {
+        panic!("assembly must refuse an unversioned entry beside a versioned one");
+    };
+    assert!(
+        report
+            .diagnostics()
+            .iter()
+            .any(|d| d.code.as_str() == "version-missing-in-group")
+    );
 }

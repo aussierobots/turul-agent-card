@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::fmt;
 
 use sha2::{Digest, Sha256};
-use turul_ai_catalog::identity::EntryKey;
+use turul_ai_catalog::identity::{EntryIdentifier, EntryKey};
 use turul_ai_catalog::json::Json;
 
 use crate::records::RecordError;
@@ -45,7 +45,8 @@ impl fmt::Display for CatalogId {
 }
 
 /// The backend key of a record within a catalog: `"h"` for the host, `"e:"` and a fixed-length
-/// digest of the entry key for an entry.
+/// digest of the entry key for an entry, `"g:"` and a fixed-length digest of the identifier for
+/// the version-kind guard of an identifier.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct RecordKey(Cow<'static, str>);
 
@@ -55,6 +56,9 @@ impl RecordKey {
     /// Prefix shared by every entry record key.
     pub const ENTRY_PREFIX: &'static str = "e:";
 
+    /// Prefix shared by every guard key.
+    pub const GUARD_PREFIX: &'static str = "g:";
+
     /// `"e:"` and the lowercase hex SHA-256 of the canonical JSON array `[identifier, version]`,
     /// an absent version being `null`.
     pub fn entry(key: &EntryKey) -> Result<RecordKey, RecordError> {
@@ -62,14 +66,28 @@ impl RecordKey {
             Some(v) => Json::String(v.to_string()),
             None => Json::Null,
         };
-        let name = Json::Array(vec![
-            Json::String(key.identifier().as_str().to_string()),
-            version,
-        ]);
-        let bytes = name.to_canonical_vec().map_err(RecordError::NotIJson)?;
-        Ok(RecordKey(Cow::Owned(format!(
-            "{}{}",
+        Self::digest_key(
             Self::ENTRY_PREFIX,
+            vec![Json::String(key.identifier().as_str().to_string()), version],
+        )
+    }
+
+    /// `"g:"` and the lowercase hex SHA-256 of the canonical JSON array `[identifier]`: the key of
+    /// the record that holds an identifier's version kind and entry count, so that one identifier
+    /// never has both unversioned and versioned entries (#multi-version-entries).
+    pub fn guard(identifier: &EntryIdentifier) -> Result<RecordKey, RecordError> {
+        Self::digest_key(
+            Self::GUARD_PREFIX,
+            vec![Json::String(identifier.as_str().to_string())],
+        )
+    }
+
+    fn digest_key(prefix: &str, name: Vec<Json>) -> Result<RecordKey, RecordError> {
+        let bytes = Json::Array(name)
+            .to_canonical_vec()
+            .map_err(RecordError::NotIJson)?;
+        Ok(RecordKey(Cow::Owned(format!(
+            "{prefix}{}",
             hex(&Sha256::digest(bytes))
         ))))
     }
