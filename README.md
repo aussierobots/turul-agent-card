@@ -133,7 +133,10 @@ without it, it serves an empty in-memory store. Load a curated catalog file (mad
 `init`, `add` and `remove`) into a store with `turul_ai_catalog_storage::import`; services that
 register themselves write through `EntryRecord::new` and `CatalogStore::put_entry`. The deploying
 project owns the table, the function and every grant (IAM, SAM, CDK): the serving role needs
-`dynamodb:GetItem` and `dynamodb:Query`, writers need `dynamodb:PutItem` and `dynamodb:DeleteItem`.
+`dynamodb:GetItem` and `dynamodb:Query`. An importer (`import`, `put_host`, `put_entry`) needs
+`dynamodb:PutItem` and `dynamodb:UpdateItem`; a writer that also removes entries (`delete_entry`)
+adds `dynamodb:DeleteItem`, `dynamodb:ConditionCheckItem` and `dynamodb:GetItem`. Entry writes are
+`TransactWriteItems` calls, which IAM authorises by these per-item actions.
 
 To serve a catalog file on a local HTTP port while developing, run the same handler as a plain
 server:
