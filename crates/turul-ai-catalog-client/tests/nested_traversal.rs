@@ -623,7 +623,7 @@ fn no_budget_warning_without_a_budget_skip() {
 #[test]
 fn fetch_alone_ignores_the_request_budget() {
     let s = Server::start(vec![ok(&leaf())]);
-    let f = fetch(&s.url("/x.json"), &budget(0)).expect("fetches");
+    let f = fetch(&s.url("/x.json"), None, &budget(0)).expect("fetches");
     assert_eq!(f.status, 200);
     assert_eq!(s.log().len(), 1);
 }

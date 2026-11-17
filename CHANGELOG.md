@@ -5,6 +5,20 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.0.22] - 2026-11-18
+
+### Changed
+
+- `turul_ai_catalog_client::fetch(url, accept, policy)` takes a caller-named `Accept` (`Option<&str>`), sent on every hop for content negotiation (RFC 9110 §12.5.1), e.g. `Some("application/a2a-agent-card+json")` for an A2A card. Pass `None` for the previous request. Safe Fetching is unchanged. See ADR-008.
+
+### Added
+
+- `FetchError::InvalidAccept`: an `Accept` value that is not a valid HTTP header value, refused before any request is sent.
+
+### Compatibility
+
+- `fetch` gains a parameter; callers add `None` to keep their behaviour. The stored entry format is unchanged, so no re-import is needed from 0.0.21.
+
 ## [0.0.21] - 2026-11-17
 
 **Breaking for anyone holding a store:** re-import under a new catalog id before deploying (see ADR-017).

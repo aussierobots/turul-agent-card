@@ -128,6 +128,6 @@ fn missing_or_repeated_content_type_is_refused() {
             .header("Content-Type", "application/json")
             .body(FIXTURE),
     ]);
-    let r = fetch(&s.url("/"), &p);
+    let r = fetch(&s.url("/"), None, &p);
     assert!(matches!(r, Err(FetchError::ContentType)), "{r:?}");
 }

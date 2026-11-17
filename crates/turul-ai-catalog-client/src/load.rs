@@ -139,7 +139,7 @@ fn retrieve(
     policy: &FetchPolicy,
     budget: &mut RequestBudget,
 ) -> Result<(AiCatalog, Option<String>, Vec<LoadWarning>), Failure> {
-    let fetched = hops(url, policy, Some(budget)).map_err(|s| match s {
+    let fetched = hops(url, None, policy, Some(budget)).map_err(|s| match s {
         Stop::Budget => Failure::Budget,
         Stop::Refused(e) => Failure::Error(LoadError::Fetch(e)),
     })?;

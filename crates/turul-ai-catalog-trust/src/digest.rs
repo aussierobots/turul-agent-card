@@ -169,7 +169,7 @@ pub fn verify_artifact(
             if url.starts_with("data:") {
                 return Err(IntegrityError::Unsupported(Unsupported::DataUri));
             }
-            let fetched = fetch(&url, policy).map_err(IntegrityError::Fetch)?;
+            let fetched = fetch(&url, None, policy).map_err(IntegrityError::Fetch)?;
             if fetched.status != 200 {
                 return Err(IntegrityError::Status(fetched.status));
             }

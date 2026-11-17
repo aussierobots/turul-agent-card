@@ -7,7 +7,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use reqwest::blocking::Client;
-use reqwest::header::{ACCEPT_ENCODING, CONTENT_ENCODING, CONTENT_TYPE, LOCATION};
+use reqwest::header::{
+    ACCEPT, ACCEPT_ENCODING, CONTENT_ENCODING, CONTENT_TYPE, HeaderValue, LOCATION,
+};
 use reqwest::redirect::Policy;
 use url::{Host, Url};
 
@@ -81,6 +83,8 @@ impl Fetched {
 pub enum FetchError {
     /// The URL, or a redirect `Location`, is not a usable absolute URL.
     InvalidUrl,
+    /// The caller-named `Accept` value is not a valid HTTP header value.
+    InvalidAccept,
     /// The scheme is not `https`, or is `http` while [`FetchPolicy::permit_loopback_http`] is off
     /// or an address of the hop is not loopback.
     Scheme,
@@ -106,6 +110,7 @@ impl fmt::Display for FetchError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             FetchError::InvalidUrl => f.write_str("invalid URL"),
+            FetchError::InvalidAccept => f.write_str("invalid Accept header value"),
             FetchError::Scheme => f.write_str("scheme not permitted"),
             FetchError::Resolve => f.write_str("host did not resolve"),
             FetchError::DisallowedAddress(ip) => write!(f, "address {ip} is not permitted"),
@@ -133,15 +138,17 @@ impl std::error::Error for FetchError {
 /// Every hop is checked before a request is sent: the scheme must be `https` (or loopback
 /// `http` when [`FetchPolicy::permit_loopback_http`] is set) and every resolved address must be
 /// globally reachable (or loopback, under the same flag). The connection is made to exactly the vetted addresses, and the
-/// `Accept-Encoding` is `identity`. The status is not interpreted; see
-/// [`accept_response`](crate::accept_response).
+/// `Accept-Encoding` is `identity`. `accept`, when given, is sent as the `Accept` header on every
+/// hop, for proactive content negotiation (RFC 9110 §12.5.1); `None` leaves the client's default
+/// (`*/*`). The status is not interpreted; see [`accept_response`](crate::accept_response).
 ///
 /// Blocking: call through `tokio::task::spawn_blocking` from async code.
 ///
 /// # Errors
 ///
 /// Returns the [`FetchError`] variant that names the first rule the request or response broke:
-/// [`InvalidUrl`](FetchError::InvalidUrl), [`Scheme`](FetchError::Scheme),
+/// [`InvalidUrl`](FetchError::InvalidUrl), [`InvalidAccept`](FetchError::InvalidAccept),
+/// [`Scheme`](FetchError::Scheme),
 /// [`Resolve`](FetchError::Resolve), [`DisallowedAddress`](FetchError::DisallowedAddress),
 /// [`TooManyRedirects`](FetchError::TooManyRedirects), [`TooLarge`](FetchError::TooLarge),
 /// [`Timeout`](FetchError::Timeout), [`ContentEncoding`](FetchError::ContentEncoding),
@@ -154,11 +161,11 @@ impl std::error::Error for FetchError {
 /// ```
 /// use turul_ai_catalog_client::{FetchError, FetchPolicy, fetch};
 ///
-/// let refused = fetch("https://10.0.0.1/ai-catalog.json", &FetchPolicy::default());
+/// let refused = fetch("https://10.0.0.1/ai-catalog.json", None, &FetchPolicy::default());
 /// assert!(matches!(refused, Err(FetchError::DisallowedAddress(_))));
 /// ```
-pub fn fetch(url: &str, policy: &FetchPolicy) -> Result<Fetched, FetchError> {
-    match hops(url, policy, None) {
+pub fn fetch(url: &str, accept: Option<&str>, policy: &FetchPolicy) -> Result<Fetched, FetchError> {
+    match hops(url, accept, policy, None) {
         Ok(fetched) => Ok(fetched),
         Err(Stop::Refused(e)) => Err(e),
         Err(Stop::Budget) => unreachable!("fetch passes no budget"),
@@ -195,9 +202,14 @@ impl From<FetchError> for Stop {
 /// hop's scheme check and address vetting.
 pub(crate) fn hops(
     url: &str,
+    accept: Option<&str>,
     policy: &FetchPolicy,
     mut budget: Option<&mut RequestBudget>,
 ) -> Result<Fetched, Stop> {
+    let accept = accept
+        .map(HeaderValue::from_str)
+        .transpose()
+        .map_err(|_| FetchError::InvalidAccept)?;
     let deadline = Instant::now() + policy.timeout;
     let mut current = url.to_string();
     let mut redirects = 0u8;
@@ -253,9 +265,13 @@ pub(crate) fn hops(
             }
             b.remaining -= 1;
         }
-        let response = client
+        let mut request = client
             .get(parsed.as_str())
-            .header(ACCEPT_ENCODING, "identity")
+            .header(ACCEPT_ENCODING, "identity");
+        if let Some(value) = &accept {
+            request = request.header(ACCEPT, value.clone());
+        }
+        let response = request
             .timeout(remaining)
             .send()
             .map_err(|e| transport(e, deadline))?;

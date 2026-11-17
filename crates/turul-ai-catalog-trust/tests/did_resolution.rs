@@ -164,7 +164,7 @@ fn resolve_is_fetch_then_accept_document() {
     assert_eq!(
         lines,
         [
-            "let fetched = fetch(&document_url(root), policy).map_err(ResolveError::Fetch)?;",
+            "let fetched = fetch(&document_url(root), None, policy).map_err(ResolveError::Fetch)?;",
             "accept_document(&fetched, root)",
         ]
     );

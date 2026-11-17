@@ -50,14 +50,14 @@ fn disallowed_literal_addresses_are_refused_before_connecting() {
         "https://[fd00:ec2::254]/",
     ];
     for u in urls {
-        let r = fetch(u, &FetchPolicy::default());
+        let r = fetch(u, None, &FetchPolicy::default());
         assert!(
             matches!(r, Err(FetchError::DisallowedAddress(_))),
             "{u} gave {r:?}"
         );
     }
     // WHATWG normalisation: the integer host is 127.0.0.1.
-    match fetch("https://2130706433/", &FetchPolicy::default()) {
+    match fetch("https://2130706433/", None, &FetchPolicy::default()) {
         Err(FetchError::DisallowedAddress(ip)) => assert_eq!(ip.to_string(), "127.0.0.1"),
         other => panic!("{other:?}"),
     }
@@ -66,7 +66,7 @@ fn disallowed_literal_addresses_are_refused_before_connecting() {
 // #safe-fetching: a name is refused by its resolved address.
 #[test]
 fn hostname_resolving_to_loopback_is_refused() {
-    let r = fetch("https://localhost/", &FetchPolicy::default());
+    let r = fetch("https://localhost/", None, &FetchPolicy::default());
     assert!(matches!(r, Err(FetchError::DisallowedAddress(_))), "{r:?}");
 }
 
@@ -77,7 +77,7 @@ fn redirect_to_a_disallowed_address_is_refused() {
         302,
         "https://169.254.169.254/latest/meta-data/",
     )]);
-    let r = fetch(&s.url("/start"), &loopback_policy());
+    let r = fetch(&s.url("/start"), None, &loopback_policy());
     assert!(matches!(r, Err(FetchError::DisallowedAddress(_))), "{r:?}");
     assert_eq!(s.log().len(), 1);
 }
@@ -91,10 +91,10 @@ fn non_https_schemes_are_refused() {
         "file:///etc/passwd",
         "ftp://93.184.216.34/",
     ] {
-        let r = fetch(u, &FetchPolicy::default());
+        let r = fetch(u, None, &FetchPolicy::default());
         assert!(matches!(r, Err(FetchError::Scheme)), "{u} gave {r:?}");
     }
-    let r = fetch("not a url", &FetchPolicy::default());
+    let r = fetch("not a url", None, &FetchPolicy::default());
     assert!(matches!(r, Err(FetchError::InvalidUrl)), "{r:?}");
 }
 
@@ -102,7 +102,7 @@ fn non_https_schemes_are_refused() {
 #[test]
 fn redirect_to_http_is_refused() {
     let s = Server::start(vec![Reply::redirect(302, "http://93.184.216.34/")]);
-    let r = fetch(&s.url("/start"), &loopback_policy());
+    let r = fetch(&s.url("/start"), None, &loopback_policy());
     assert!(matches!(r, Err(FetchError::Scheme)), "{r:?}");
 }
 
@@ -110,7 +110,7 @@ fn redirect_to_http_is_refused() {
 #[test]
 fn loopback_http_is_refused_by_default() {
     let s = Server::start(vec![Reply::ok(CATALOG, b"{}")]);
-    let r = fetch(&s.url("/"), &FetchPolicy::default());
+    let r = fetch(&s.url("/"), None, &FetchPolicy::default());
     assert!(r.is_err(), "{r:?}");
     assert!(s.log().is_empty(), "no connection may be made");
 }
@@ -118,11 +118,11 @@ fn loopback_http_is_refused_by_default() {
 #[test]
 fn loopback_http_is_permitted_only_by_the_switch() {
     let s = Server::start(vec![Reply::ok(CATALOG, b"{}")]);
-    let f = fetch(&s.url("/"), &loopback_policy()).expect("served");
+    let f = fetch(&s.url("/"), None, &loopback_policy()).expect("served");
     assert_eq!(f.status, 200);
     assert_eq!(f.body, b"{}");
     // The switch does not open plain http to a non-loopback address.
-    let r = fetch("http://93.184.216.34/", &loopback_policy());
+    let r = fetch("http://93.184.216.34/", None, &loopback_policy());
     assert!(matches!(r, Err(FetchError::Scheme)), "{r:?}");
 }
 
@@ -133,7 +133,7 @@ fn body_at_the_ceiling_is_accepted() {
     p.max_body_bytes = 1024;
     for length in [Length::Exact, Length::Omit] {
         let s = Server::start(vec![Reply::ok(CATALOG, &[b'a'; 1024]).length(length)]);
-        let f = fetch(&s.url("/"), &p).expect("at ceiling");
+        let f = fetch(&s.url("/"), None, &p).expect("at ceiling");
         assert_eq!(f.body.len(), 1024);
     }
 }
@@ -144,14 +144,14 @@ fn body_over_the_ceiling_is_refused() {
     p.max_body_bytes = 1024;
     for length in [Length::Exact, Length::Omit] {
         let s = Server::start(vec![Reply::ok(CATALOG, &[b'a'; 1025]).length(length)]);
-        let r = fetch(&s.url("/"), &p);
+        let r = fetch(&s.url("/"), None, &p);
         assert!(matches!(r, Err(FetchError::TooLarge)), "{r:?}");
     }
     // An announced length above the ceiling is refused whatever follows.
     let s = Server::start(vec![
         Reply::ok(CATALOG, b"x").length(Length::Announce(5000)),
     ]);
-    let r = fetch(&s.url("/"), &p);
+    let r = fetch(&s.url("/"), None, &p);
     assert!(matches!(r, Err(FetchError::TooLarge)), "{r:?}");
 }
 
@@ -166,7 +166,7 @@ fn stalled_response_times_out() {
             .stall_after_head(Duration::from_secs(5)),
     ]);
     let t = Instant::now();
-    let r = fetch(&s.url("/"), &p);
+    let r = fetch(&s.url("/"), None, &p);
     assert!(matches!(r, Err(FetchError::Timeout)), "{r:?}");
     assert!(t.elapsed() < Duration::from_secs(3));
 }
@@ -180,7 +180,7 @@ fn trickling_body_times_out() {
         Reply::ok(CATALOG, &[b' '; 20]).drip(Duration::from_millis(300)),
     ]);
     let t = Instant::now();
-    let r = fetch(&s.url("/"), &p);
+    let r = fetch(&s.url("/"), None, &p);
     assert!(matches!(r, Err(FetchError::Timeout)), "{r:?}");
     assert!(t.elapsed() < Duration::from_secs(2), "{:?}", t.elapsed());
 }
@@ -196,7 +196,7 @@ fn deadline_spans_redirect_hops() {
         Reply::redirect(302, "/c").delay(d),
         Reply::ok(CATALOG, b"{}").delay(d),
     ]);
-    let r = fetch(&s.url("/a"), &p);
+    let r = fetch(&s.url("/a"), None, &p);
     assert!(matches!(r, Err(FetchError::Timeout)), "{r:?}");
 }
 
@@ -206,14 +206,19 @@ fn sixth_redirect_is_refused() {
     let p = loopback_policy();
     assert_eq!(p.max_redirects, 5);
     let s = Server::start((0..8).map(|_| Reply::redirect(302, "/n")).collect());
-    let r = fetch(&s.url("/n"), &p);
+    let r = fetch(&s.url("/n"), None, &p);
     assert!(matches!(r, Err(FetchError::TooManyRedirects)), "{r:?}");
     assert_eq!(s.log().len(), 6, "the original request plus five redirects");
 
     let mut replies: Vec<Reply> = (0..5).map(|_| Reply::redirect(302, "/n")).collect();
     replies.push(Reply::ok(CATALOG, b"{}"));
     let s = Server::start(replies);
-    assert_eq!(fetch(&s.url("/n"), &p).expect("five redirects").status, 200);
+    assert_eq!(
+        fetch(&s.url("/n"), None, &p)
+            .expect("five redirects")
+            .status,
+        200
+    );
 }
 
 // #safe-fetching: every fetched document is untrusted input.
@@ -248,13 +253,13 @@ fn identity_encoding_is_requested_and_other_encodings_refused() {
         Reply::ok(CATALOG, b"{}"),
         Reply::ok(CATALOG, b"{}").header("Content-Encoding", "gzip"),
     ]);
-    fetch(&s.url("/a"), &loopback_policy()).expect("identity");
+    fetch(&s.url("/a"), None, &loopback_policy()).expect("identity");
     let log = s.log();
     assert_eq!(log[0].header("accept-encoding"), Some("identity"));
     assert!(matches!(log[0].header("accept"), None | Some("*/*")));
     assert!(log[0].header("cookie").is_none());
     assert!(log[0].header("authorization").is_none());
-    let r = fetch(&s.url("/b"), &loopback_policy());
+    let r = fetch(&s.url("/b"), None, &loopback_policy());
     assert!(matches!(r, Err(FetchError::ContentEncoding)), "{r:?}");
 }
 
@@ -263,7 +268,7 @@ fn identity_encoding_is_requested_and_other_encodings_refused() {
 fn proxy_environment_is_ignored() {
     if std::env::var("FETCH_PROXY_CHILD").is_ok() {
         let s = Server::start(vec![Reply::ok(CATALOG, b"{}")]);
-        let f = fetch(&s.url("/"), &loopback_policy()).expect("direct fetch");
+        let f = fetch(&s.url("/"), None, &loopback_policy()).expect("direct fetch");
         assert_eq!(f.status, 200);
         return;
     }
@@ -297,7 +302,7 @@ fn fetched_url_is_the_final_url() {
         Reply::redirect(301, "/final"),
         Reply::ok(CATALOG, b"{}"),
     ]);
-    let f = fetch(&s.url("/start"), &loopback_policy()).unwrap();
+    let f = fetch(&s.url("/start"), None, &loopback_policy()).unwrap();
     assert_eq!(f.url(), Some(s.url("/final").as_str()));
     assert_eq!(Fetched::new(200, None, Vec::new()).url(), None);
 }
@@ -306,7 +311,7 @@ fn fetched_url_is_the_final_url() {
 #[test]
 fn redirect_without_location_is_a_final_response() {
     let s = Server::start(vec![Reply::new(302)]);
-    let f = fetch(&s.url("/"), &loopback_policy()).unwrap();
+    let f = fetch(&s.url("/"), None, &loopback_policy()).unwrap();
     assert_eq!(f.status, 302);
 }
 
@@ -316,7 +321,7 @@ fn relative_redirect_location_resolves_against_the_hop_url() {
         Reply::redirect(307, "../next?x=1"),
         Reply::ok(CATALOG, b"{}"),
     ]);
-    let f = fetch(&s.url("/a/b/c"), &loopback_policy()).unwrap();
+    let f = fetch(&s.url("/a/b/c"), None, &loopback_policy()).unwrap();
     assert_eq!(s.log()[1].path(), "/a/next?x=1");
     assert_eq!(f.url(), Some(s.url("/a/next?x=1").as_str()));
 }
@@ -417,4 +422,29 @@ fn fetch_is_the_only_request_path() {
         }
     }
     assert!(named_fetch, "fetch.rs must be the code that names reqwest");
+}
+
+// RFC 9110 §12.5.1: a caller-named Accept is sent on every hop, redirects included, and Safe
+// Fetching is unchanged.
+#[test]
+fn caller_named_accept_is_sent_on_every_hop() {
+    let a2a = "application/a2a-agent-card+json";
+    let s = Server::start(vec![Reply::redirect(302, "/card"), Reply::ok(a2a, b"{}")]);
+    let f = fetch(&s.url("/start"), Some(a2a), &loopback_policy()).expect("fetched");
+    assert_eq!(f.status, 200);
+    let log = s.log();
+    assert_eq!(log.len(), 2);
+    for hop in &log {
+        assert_eq!(hop.header("accept"), Some(a2a));
+        assert_eq!(hop.header("accept-encoding"), Some("identity"));
+    }
+}
+
+// A value that cannot be an HTTP header is refused before any request is sent.
+#[test]
+fn invalid_accept_is_refused_before_sending() {
+    let s = Server::start(vec![Reply::ok(CATALOG, b"{}")]);
+    let r = fetch(&s.url("/"), Some("bad\nvalue"), &loopback_policy());
+    assert!(matches!(r, Err(FetchError::InvalidAccept)), "{r:?}");
+    assert!(s.log().is_empty());
 }

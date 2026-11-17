@@ -211,7 +211,7 @@ pub fn accept_document(fetched: &Fetched, root: &DidWebRoot) -> Result<DidDocume
 ///
 /// [`ResolveError::Fetch`] when retrieval fails, otherwise the errors of [`accept_document`].
 pub fn resolve(root: &DidWebRoot, policy: &FetchPolicy) -> Result<DidDocument, ResolveError> {
-    let fetched = fetch(&document_url(root), policy).map_err(ResolveError::Fetch)?;
+    let fetched = fetch(&document_url(root), None, policy).map_err(ResolveError::Fetch)?;
     accept_document(&fetched, root)
 }
 
