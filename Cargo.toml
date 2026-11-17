@@ -10,7 +10,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.0.15"
+version = "0.0.16"
 edition = "2024"
 authors = ["Nick Hortovanyi <nick@aussierobots.com.au>"]
 license = "Apache-2.0"
@@ -19,9 +19,9 @@ keywords = ["ai-catalog", "agent-card", "agent", "a2a", "mcp"]
 rust-version = "1.95"
 
 [workspace.dependencies]
-turul-ai-catalog = { path = "crates/turul-ai-catalog", version = "0.0.15" }
-turul-ai-catalog-client = { path = "crates/turul-ai-catalog-client", version = "0.0.15" }
-turul-ai-catalog-tui = { path = "crates/turul-ai-catalog-tui", version = "0.0.15" }
+turul-ai-catalog = { path = "crates/turul-ai-catalog", version = "0.0.16" }
+turul-ai-catalog-client = { path = "crates/turul-ai-catalog-client", version = "0.0.16" }
+turul-ai-catalog-tui = { path = "crates/turul-ai-catalog-tui", version = "0.0.16" }
 ratatui = "0.29.0"
 crossterm = "0.28.1"
 clap = { version = "4", features = ["derive"] }

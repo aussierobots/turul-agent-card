@@ -494,7 +494,7 @@ DA = opus devil's advocate (verdict block); FR = fable review (verdict revise); 
 | DA-14 `specVersion` checked after the CDDL shape | accepted | `parse` gates `specVersion` first (`UnsupportedMajor`); S1 tests a 2.0 document without `entries`. |
 | DA-15 Fragments and exemptions unspecified | accepted | AMB-66 and ADR-001: per-block wrapping rules and two exemptions with their spec reasons. |
 | DA-16 Wrong licence for spec examples | accepted | D9: CC-BY-4.0 for spec examples and Apache-2.0 for SDK fixtures; `tests/fixtures` excluded from packages (S13). |
-| DA-17 Requirements and test files claimed by two ADRs | accepted | Each id and test file now has one ADR; `number::is_i_json` and `NestingDepth` are named owners. |
+| DA-17 Requirements and test files claimed by two ADRs | accepted | Each id and test file now has one ADR; `number::is_i_json` and `NestingDepth` are named owners (M20 later replaced `is_i_json` with `number::to_canonical` and `number::defect`). |
 | DA-18 Hollow "absence" tests counted as coverage | accepted | contributor-identity-4, verification-procedures-1 and trust-layers-1/2 are now OOS:D8 with reasons. |
 | DA-19 Schema-digest substitution buried in prose | accepted | Ask D17. |
 | DA-20 D1 underplays wrapping; "record tension" defers debt | accepted | D1 is replaced by an M4 citation with the cost recorded as accepted (§0); upstreamable RD ids are ask D20. |

@@ -223,7 +223,7 @@ Agreements: `entry-duplicate`, `timestamp-invalid`, `extension-key-invalid`, `ne
 - `validate` costs one `to_json` and one walk per document; nested inline catalogs are mapped once more through `parse::catalog`. No consumer needs it faster today.
 - Until S5, `validate` ignores `trustManifests` and `signature` content, so a document with a malformed manifest can report `Met`. S5 adds `validate_manifest` and closes this; ADR-006 owns those tests.
 - ADR-002 is revised in this slice: `parse` calls `parse::catalog` (object check, gate, `document`), and its "Value → model" and "Version gate" owner rows name it.
-- Plan drift: PLAN §3 lists nine test files. This ADR adds `noncharacter_diagnostics.rs` (already promised by ADR-002 AMB-93) and the diagnostic halves of `artifact_types.rs` (promised by ADR-004) and `artifact_source.rs` (RD-02 `url-empty`). PLAN §2 lists `uri` for S4; only `is_uri_with_authority` lands here, `absolute-URI` lands with its caller in S5 (the ADR-003 `is_i_json` precedent).
+- Plan drift: PLAN §3 lists nine test files. This ADR adds `noncharacter_diagnostics.rs` (already promised by ADR-002 AMB-93) and the diagnostic halves of `artifact_types.rs` (promised by ADR-004) and `artifact_source.rs` (RD-02 `url-empty`). PLAN §2 lists `uri` for S4; only `is_uri_with_authority` lands here, `absolute-URI` lands with its caller in S5 (a helper lands with its first caller, as in ADR-003).
 
 ## Revision log
 

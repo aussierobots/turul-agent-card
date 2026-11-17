@@ -5,6 +5,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.0.16] - 2026-11-17
+
 ### Added
 
 - `validate::Code::NumberInexact` (`number-inexact`): a number whose RFC 8785 form denotes another value (`9007199254740993`, `333333333.33333329`, `1e-400`). Always a warning, signed and digested contexts included. See ADR-005.
