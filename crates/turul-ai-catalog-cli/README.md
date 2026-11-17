@@ -28,7 +28,7 @@ turul-ai-catalog add    --file catalog.json --identifier ID --type TYPE (--url U
 turul-ai-catalog remove --file catalog.json --identifier ID [--version V]
 ```
 
-`validate` and `list` write their output, diagnostics included, to stdout; `--format json` writes the canonical JSON of the loaded tree (filtered, for `list`). Load warnings go to stderr. Producer commands print their diagnostics to stderr.
+`validate` and `list` write their output, diagnostics included, to stdout; `list` prints one line per entry: name, identifier, type, version and url (`-` for an embedded entry); `--format json` writes the canonical JSON of the loaded tree (filtered, for `list`). Load warnings go to stderr. Producer commands print their diagnostics to stderr.
 
 ## Operating a store
 

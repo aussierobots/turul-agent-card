@@ -207,6 +207,37 @@ fn list_json_is_the_canonical_bytes_of_the_resolved_catalog() {
 }
 
 #[test]
+fn list_text_ends_each_entry_line_with_its_url() {
+    // The fixture has no nested catalog, so its lines are exactly the root rows.
+    let out = run_file(&["list"], "ai-catalog.json");
+    assert_eq!(code(&out), 0);
+    let tree = load(
+        &Source::File(fixture("ai-catalog.json")),
+        &FetchPolicy::default(),
+    )
+    .unwrap();
+    let text = stdout(&out);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), tree.rows.len());
+    for (line, row) in lines.iter().zip(&tree.rows) {
+        let url = match &tree.document.entries[row.index].source {
+            turul_ai_catalog::model::ArtifactSource::Url(url) => url.as_str(),
+            turul_ai_catalog::model::ArtifactSource::Data(_) => "-",
+        };
+        assert!(line.ends_with(&format!("  {url}")), "{line}");
+    }
+    assert!(text.contains("https://api.acme-corp.com/agents/acme-finance-agent.json"));
+
+    // An entry with embedded `data` has no url.
+    let nested = stdout(&run_file(&["list"], "nested-error.json"));
+    let inline = nested
+        .lines()
+        .find(|l| l.contains("urn:air:example.com:catalog:inline"))
+        .expect("the embedded entry is listed");
+    assert!(inline.ends_with("  -"), "{inline}");
+}
+
+#[test]
 fn validate_json_is_the_canonical_bytes_of_the_resolved_catalog() {
     let out = run_file(&["validate", "--format", "json"], "ai-catalog.json");
     assert_eq!(code(&out), 0);

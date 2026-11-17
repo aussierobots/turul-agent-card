@@ -5,6 +5,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.0.25] - 2026-11-18
+
+### Changed
+
+- `turul-ai-catalog list` text output ends each entry line with the entry's `url` (`-` for an entry with embedded `data`). Before, only `--format json` showed it. The text form remains for people, not a contract.
+
 ## [0.0.24] - 2026-11-18
 
 ### Changed

@@ -8,6 +8,7 @@ use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use turul_ai_catalog::identity::{ArtifactType, EntryIdentifier, EntryKey};
+use turul_ai_catalog::model::ArtifactSource;
 use turul_ai_catalog::validate::{Diagnostic, Severity};
 use turul_ai_catalog_client::{
     Change, Child, Content, DisplayText, EntryInput, FetchPolicy, Filter, HostInput, LoadError,
@@ -394,17 +395,23 @@ fn validate_text(tree: &ResolvedCatalog, label: &str, out: &mut dyn Write) -> io
     Ok(())
 }
 
-/// Writes one line per entry row of every catalog node.
+/// Writes one line per entry row of every catalog node: name, identifier, type, version and the
+/// entry's `url` (`-` for embedded `data`).
 fn list_text(tree: &ResolvedCatalog, out: &mut dyn Write) -> io::Result<()> {
     for row in &tree.rows {
         let entry = &tree.document.entries[row.index];
+        let url = match &entry.source {
+            ArtifactSource::Url(url) => url.as_str(),
+            ArtifactSource::Data(_) => "-",
+        };
         writeln!(
             out,
-            "{}  {}  {}  {}",
+            "{}  {}  {}  {}  {}",
             DisplayText::new(&row.name),
             DisplayText::new(entry.identifier.as_str()),
             DisplayText::new(entry.artifact_type.as_str()),
             DisplayText::new(row.version.as_deref().unwrap_or("-")),
+            DisplayText::new(url),
         )?;
     }
     for n in &tree.children {
