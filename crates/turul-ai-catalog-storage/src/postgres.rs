@@ -75,7 +75,7 @@ impl PostgresCatalogStore {
     ) -> Result<Etag, StoreError> {
         let etag = Etag::of(bytes);
         let sql = match &condition {
-            Condition::Any | Condition::Overwrite => {
+            Condition::Any => {
                 "INSERT INTO catalog_records (catalog_id, record_key, record, etag) \
                  VALUES ($1, $2, $3, $4) \
                  ON CONFLICT (catalog_id, record_key) DO UPDATE \
@@ -85,7 +85,7 @@ impl PostgresCatalogStore {
                 "INSERT INTO catalog_records (catalog_id, record_key, record, etag) \
                  VALUES ($1, $2, $3, $4) ON CONFLICT (catalog_id, record_key) DO NOTHING"
             }
-            Condition::Matches(_) => {
+            Condition::Matches(_) | Condition::Overwrite(_) => {
                 "UPDATE catalog_records SET record = $3, etag = $4 \
                  WHERE catalog_id = $1 AND record_key = $2 AND etag = $5"
             }
@@ -95,7 +95,7 @@ impl PostgresCatalogStore {
             .bind(key.as_str())
             .bind(bytes)
             .bind(etag.as_str());
-        if let Condition::Matches(expected) = &condition {
+        if let Condition::Matches(expected) | Condition::Overwrite(expected) = &condition {
             query = query.bind(expected.as_str());
         }
         let done = query.execute(&self.pool).await.map_err(backend)?;
@@ -214,9 +214,9 @@ impl CatalogStore for PostgresCatalogStore {
         let mode = provenance.kind();
         let mut tx = self.pool.begin().await.map_err(backend)?;
         let (guard_versioned, entries) = lock_guard(&mut tx, catalog, &guard, versioned).await?;
-        // An overwrite checks that a record exists and reads none of it.
-        let stored = sqlx::query(if condition == Condition::Overwrite {
-            "SELECT 1 AS present FROM catalog_records WHERE catalog_id = $1 AND record_key = $2"
+        // An overwrite reads the stored version and nothing of the record.
+        let stored = sqlx::query(if matches!(condition, Condition::Overwrite(_)) {
+            "SELECT etag FROM catalog_records WHERE catalog_id = $1 AND record_key = $2"
         } else {
             "SELECT etag, mode FROM catalog_records WHERE catalog_id = $1 AND record_key = $2"
         })
@@ -226,17 +226,18 @@ impl CatalogStore for PostgresCatalogStore {
         .await
         .map_err(backend)?;
         let created = match (&condition, stored) {
-            (Condition::Absent, Some(_)) | (Condition::Matches(_), None) => {
+            (Condition::Absent, Some(_))
+            | (Condition::Matches(_) | Condition::Overwrite(_), None) => {
                 return Err(StoreError::PreconditionFailed);
             }
             (_, Some(row)) => {
-                if let Condition::Matches(e) = &condition {
+                if let Condition::Matches(e) | Condition::Overwrite(e) = &condition {
                     let stored_etag: String = row.try_get("etag").map_err(backend)?;
                     if stored_etag != e.as_str() {
                         return Err(StoreError::PreconditionFailed);
                     }
                 }
-                if condition != Condition::Overwrite {
+                if !matches!(condition, Condition::Overwrite(_)) {
                     let stored_mode: Option<String> = row.try_get("mode").map_err(backend)?;
                     match stored_mode.as_deref().map(ModeKind::from_name) {
                         Some(Some(stored)) if stored == mode => {}

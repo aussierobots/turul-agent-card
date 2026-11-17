@@ -488,7 +488,7 @@ struct Recording {
     inner: InMemoryCatalogStore,
     log: Mutex<Vec<String>>,
     assembled: Mutex<Vec<Result<Vec<u8>, String>>>,
-    rewrite_before_scan_returns: Mutex<Option<EntryRecord>>,
+    write_before_scan_returns: Mutex<Option<(EntryRecord, Provenance)>>,
     delete_before_scan_returns: Mutex<Option<EntryKey>>,
 }
 
@@ -498,7 +498,7 @@ impl Recording {
             inner: InMemoryCatalogStore::new(),
             log: Mutex::new(Vec::new()),
             assembled: Mutex::new(Vec::new()),
-            rewrite_before_scan_returns: Mutex::new(None),
+            write_before_scan_returns: Mutex::new(None),
             delete_before_scan_returns: Mutex::new(None),
         }
     }
@@ -566,10 +566,10 @@ impl CatalogStore for Recording {
     }
     async fn scan_entries(&self, c: &CatalogId) -> Result<Vec<ScannedEntry>, StoreError> {
         let scanned = self.inner.scan_entries(c).await?;
-        let late = self.rewrite_before_scan_returns.lock().unwrap().take();
-        if let Some(record) = late {
+        let late = self.write_before_scan_returns.lock().unwrap().take();
+        if let Some((record, provenance)) = late {
             self.inner
-                .put_entry(c, &record, &curated_by("late-writer"), Condition::Overwrite)
+                .put_entry(c, &record, &provenance, Condition::Any)
                 .await?;
         }
         let gone = self.delete_before_scan_returns.lock().unwrap().take();
@@ -680,7 +680,10 @@ fn replace_stops_when_a_record_changed_after_the_scan() {
     .unwrap();
     let mut changed = entry("urn:air:absent", None);
     changed.description = Some("rewritten".to_string());
-    *store.rewrite_before_scan_returns.lock().unwrap() = Some(EntryRecord::new(changed).unwrap());
+    *store.write_before_scan_returns.lock().unwrap() = Some((
+        EntryRecord::new(changed).unwrap(),
+        curated_by("late-writer"),
+    ));
     let doc = document(false, &[("urn:air:a", None)]);
     assert_eq!(
         block_on(import(&store, &c, &doc, &writer("operator"), replace())),
@@ -690,6 +693,49 @@ fn replace_stops_when_a_record_changed_after_the_scan() {
         .unwrap()
         .unwrap();
     assert_eq!(kept.provenance, curated_by("late-writer"));
+}
+
+#[test]
+fn replace_does_not_overwrite_a_lease_registered_after_the_scan() {
+    let store = Recording::new();
+    let c = catalog("c");
+    let late = record("urn:air:late", None);
+    let registered = lease("svc", "2999-01-01T00:00:00Z");
+    *store.write_before_scan_returns.lock().unwrap() = Some((late.clone(), registered.clone()));
+    let doc = document(false, &[("urn:air:late", None)]);
+    assert_eq!(
+        block_on(import(&store, &c, &doc, &writer("operator"), replace())),
+        Err(ImportError::Store(StoreError::PreconditionFailed))
+    );
+    let kept = block_on(store.inner.get_entry(&c, &late.key()))
+        .unwrap()
+        .unwrap();
+    assert_eq!(kept.provenance, registered);
+}
+
+#[test]
+fn replace_does_not_overwrite_a_lease_refreshed_after_the_scan() {
+    let store = Recording::new();
+    let c = catalog("c");
+    let a = record("urn:air:a", None);
+    put(
+        &store.inner,
+        &c,
+        "urn:air:a",
+        None,
+        &lease("svc", "2000-01-01T00:00:00Z"),
+    );
+    let refreshed = lease("svc", "2999-01-01T00:00:00Z");
+    *store.write_before_scan_returns.lock().unwrap() = Some((a.clone(), refreshed.clone()));
+    let doc = document(false, &[("urn:air:a", None)]);
+    assert_eq!(
+        block_on(import(&store, &c, &doc, &writer("operator"), replace())),
+        Err(ImportError::Store(StoreError::PreconditionFailed))
+    );
+    let kept = block_on(store.inner.get_entry(&c, &a.key()))
+        .unwrap()
+        .unwrap();
+    assert_eq!(kept.provenance, refreshed);
 }
 
 #[test]

@@ -17,10 +17,10 @@ pub enum Condition {
     Absent,
     /// The record must exist with this version.
     Matches(Etag),
-    /// An entry write replaces whatever record is stored under the key, whatever its mode and
-    /// whether its provenance reads; the old record is never read. On a key with no record it is
-    /// a create, as `Any`. A host write treats it as `Any`.
-    Overwrite,
+    /// The record must exist with this version, as `Matches`; an entry write then replaces it
+    /// whatever its mode and whether its provenance reads, and the old record is never read. A
+    /// host write treats it as `Matches`.
+    Overwrite(Etag),
 }
 
 /// A record and its version.

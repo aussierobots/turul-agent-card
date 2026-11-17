@@ -288,7 +288,10 @@ fn purge_without_yes_previews_and_removes_nothing() {
 #[test]
 fn purge_with_yes_removes_every_item() {
     let db = Db::seeded("purge-yes");
-    let out = run(&[&purge_args(&db, "main")[..], &["--yes"]].concat(), &[]);
+    let out = run(
+        &[&purge_args(&db, "main")[..], &["--yes"]].concat(),
+        &[("TURUL_AI_CATALOG_ID", "live")],
+    );
     assert_eq!(code(&out), 0, "{}", stderr(&out));
     assert_eq!(stdout(&out), format!("{MAIN_COUNTS}removed 4 items\n"));
     assert_eq!(list_main(&db), "");
@@ -297,7 +300,10 @@ fn purge_with_yes_removes_every_item() {
 #[test]
 fn purge_of_an_empty_catalog_reports_zeros_and_exits_0() {
     let db = Db::seeded("purge-empty");
-    let out = run(&[&purge_args(&db, "none")[..], &["--yes"]].concat(), &[]);
+    let out = run(
+        &[&purge_args(&db, "none")[..], &["--yes"]].concat(),
+        &[("TURUL_AI_CATALOG_ID", "live")],
+    );
     assert_eq!(code(&out), 0, "{}", stderr(&out));
     assert_eq!(
         stdout(&out),
@@ -326,6 +332,20 @@ fn purge_refuses_the_live_catalog_id() {
         &[("TURUL_AI_CATALOG_ID", "main")],
     );
     assert_eq!(code(&out), 2);
+    assert!(
+        stderr(&out).contains("TURUL_AI_CATALOG_ID"),
+        "{}",
+        stderr(&out)
+    );
+    assert_eq!(list_main(&db).lines().count(), 2);
+}
+
+#[test]
+fn purge_with_yes_refuses_while_the_live_id_is_unset() {
+    let db = Db::seeded("purge-unset");
+    let out = run(&[&purge_args(&db, "main")[..], &["--yes"]].concat(), &[]);
+    assert_eq!(code(&out), 2);
+    assert_eq!(stdout(&out), "");
     assert!(
         stderr(&out).contains("TURUL_AI_CATALOG_ID"),
         "{}",

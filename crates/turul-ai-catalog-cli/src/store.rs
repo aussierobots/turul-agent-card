@@ -51,7 +51,8 @@ pub enum StoreCommand {
         #[arg(long)]
         replace: bool,
     },
-    /// Remove every item of a catalog id; without --yes, only count them.
+    /// Remove every item of a catalog id; without --yes, only count them. --yes requires
+    /// TURUL_AI_CATALOG_ID (the served id, which cannot be purged).
     Purge {
         #[command(flatten)]
         target: Target,
@@ -223,12 +224,23 @@ async fn import_document(
 }
 
 async fn purge(target: Target, yes: bool) -> u8 {
-    if std::env::var(LIVE_CATALOG_ID).is_ok_and(|live| live == target.catalog_id) {
-        return fail(&format!(
-            "refusing to purge catalog id {}: it is the value of {LIVE_CATALOG_ID}, the id served \
-             by the deployed function; give the id to purge as --catalog-id",
-            target.catalog_id
-        ));
+    // A removal must know the served id to refuse it; an unset variable would let any id through.
+    match std::env::var(LIVE_CATALOG_ID) {
+        Err(_) if yes => {
+            return fail(&format!(
+                "refusing to purge catalog id {} with --yes while {LIVE_CATALOG_ID} is unset: set \
+                 it to the id served by the deployed function",
+                target.catalog_id
+            ));
+        }
+        Ok(live) if live == target.catalog_id => {
+            return fail(&format!(
+                "refusing to purge catalog id {}: it is the value of {LIVE_CATALOG_ID}, the id \
+                 served by the deployed function; give the id to purge as --catalog-id",
+                target.catalog_id
+            ));
+        }
+        _ => {}
     }
     let (store, catalog) = match target.open().await {
         Ok(opened) => opened,

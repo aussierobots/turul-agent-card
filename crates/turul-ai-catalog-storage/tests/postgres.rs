@@ -256,7 +256,8 @@ parity_checks!(
     count_catalog_is_what_purge_removes,
     purge_leaves_other_catalogs_untouched,
     overwrite_replaces_a_record_of_either_mode,
-    overwrite_of_a_missing_key_creates_as_any,
+    overwrite_requires_the_stored_version,
+    overwrite_of_a_host_requires_its_version,
     scan_entries_matches_list_entries,
 );
 

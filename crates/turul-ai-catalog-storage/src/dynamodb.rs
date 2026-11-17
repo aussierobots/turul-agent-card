@@ -190,11 +190,11 @@ impl DynamoDbCatalogStore {
             .item("record", AttributeValue::B(Blob::new(bytes)))
             .item("etag", s(etag.as_str()));
         match &condition {
-            Condition::Any | Condition::Overwrite => {}
+            Condition::Any => {}
             Condition::Absent => {
                 request = request.condition_expression("attribute_not_exists(pk)");
             }
-            Condition::Matches(expected) => {
+            Condition::Matches(expected) | Condition::Overwrite(expected) => {
                 request = request
                     .condition_expression("etag = :e")
                     .expression_attribute_values(":e", s(expected.as_str()));
@@ -257,15 +257,16 @@ impl DynamoDbCatalogStore {
         Err(StoreError::Contended)
     }
 
-    /// Replaces the entry item under `item.key` whatever it holds, or creates it with its guard
-    /// when none exists. The old item is never read: the put is conditioned on existence alone, and
-    /// `PutItem` replaces every attribute. An item inside another writer's transaction is retried
-    /// with backoff, up to [`ATTEMPTS`] attempts, then `Contended`.
+    /// Replaces the entry item under `item.key` when its stored version is `expected`, whatever its
+    /// mode and whether its provenance reads. The old item is never read: the put is conditioned on
+    /// the `etag` attribute alone, and `PutItem` replaces every attribute; a replace keeps the key,
+    /// so the guard count is unchanged. An item inside another writer's transaction is retried with
+    /// backoff, up to [`ATTEMPTS`] attempts, then `Contended`.
     async fn overwrite(
         &self,
         catalog: &CatalogId,
         item: &EntryItem<'_>,
-        guard: &RecordKey,
+        expected: &Etag,
     ) -> Result<Etag, StoreError> {
         for attempt in 0..ATTEMPTS {
             if attempt > 0 {
@@ -281,24 +282,14 @@ impl DynamoDbCatalogStore {
                 .item(PROVENANCE, AttributeValue::B(Blob::new(item.provenance)))
                 .item(MODE, s(item.mode.as_str()))
                 .item("etag", s(item.etag.as_str()))
-                .condition_expression("attribute_exists(pk)");
+                .condition_expression("etag = :e")
+                .expression_attribute_values(":e", s(expected.as_str()));
             match put.send().await {
                 Ok(_) => return Ok(item.etag.clone()),
-                Err(e) if condition_failed(&e) => {}
+                Err(e) if condition_failed(&e) => return Err(StoreError::PreconditionFailed),
                 // The item is inside another writer's transaction.
-                Err(e) if e.code() == Some("TransactionConflictException") => continue,
+                Err(e) if e.code() == Some("TransactionConflictException") => {}
                 Err(e) => return Err(backend(e)),
-            }
-            let items = self.create_items(catalog, item, guard)?;
-            let Some(cancelled) = self.transact(items).await? else {
-                return Ok(item.etag.clone());
-            };
-            // An item that appeared meanwhile is replaced on the next attempt.
-            if cancelled.failed(1) {
-                return Err(kind_conflict(item.record));
-            }
-            if !cancelled.failed(0) && !cancelled.conflicted() {
-                return Err(cancelled.into_error());
             }
         }
         Err(StoreError::Contended)
@@ -520,10 +511,10 @@ impl CatalogStore for DynamoDbCatalogStore {
         if let Condition::Matches(expected) = &condition {
             return self.replace(catalog, &item, Some(expected)).await;
         }
-        let guard = RecordKey::guard(&record.entry().identifier).map_err(key_error)?;
-        if condition == Condition::Overwrite {
-            return self.overwrite(catalog, &item, &guard).await;
+        if let Condition::Overwrite(expected) = &condition {
+            return self.overwrite(catalog, &item, expected).await;
         }
+        let guard = RecordKey::guard(&record.entry().identifier).map_err(key_error)?;
         for attempt in 0..ATTEMPTS {
             if attempt > 0 {
                 back_off(attempt).await;

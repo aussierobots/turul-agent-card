@@ -274,7 +274,8 @@ parity_checks!(
     count_catalog_is_what_purge_removes,
     purge_leaves_other_catalogs_untouched,
     overwrite_replaces_a_record_of_either_mode,
-    overwrite_of_a_missing_key_creates_as_any,
+    overwrite_requires_the_stored_version,
+    overwrite_of_a_host_requires_its_version,
     scan_entries_matches_list_entries,
 );
 
@@ -680,7 +681,7 @@ fn conflicting_store(
 }
 
 /// A write that conflicts with other writers' transactions on every attempt stops after the
-/// bound of 8 attempts with `Contended`, on the create path and on the replace path.
+/// bound of 8 attempts with `Contended`, on the create, replace and overwrite paths.
 #[tokio::test]
 #[ignore = "needs DynamoDB Local"]
 async fn conflicts_on_every_attempt_are_contended() {
@@ -713,6 +714,21 @@ async fn conflicts_on_every_attempt_are_contended() {
         )
         .await;
     assert_eq!(replaced, Err(StoreError::Contended));
+    assert_eq!(answered.load(std::sync::atomic::Ordering::SeqCst), 8);
+
+    let (store, answered) = conflicting_store(
+        &env,
+        r#"{"__type":"com.amazonaws.dynamodb.v20120810#TransactionConflictException","message":"Transaction is ongoing for the item"}"#,
+    );
+    let overwritten = store
+        .put_entry(
+            &c,
+            &r,
+            &common::curated(),
+            Condition::Overwrite(Etag::of(b"any")),
+        )
+        .await;
+    assert_eq!(overwritten, Err(StoreError::Contended));
     assert_eq!(answered.load(std::sync::atomic::Ordering::SeqCst), 8);
 }
 

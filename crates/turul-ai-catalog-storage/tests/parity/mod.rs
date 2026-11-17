@@ -1479,7 +1479,7 @@ pub async fn purge_leaves_other_catalogs_untouched(store: &dyn CatalogStore) {
 pub async fn overwrite_replaces_a_record_of_either_mode(store: &dyn CatalogStore) {
     let c = id("overwrite-replaces-a-record-of-either-mode");
     let r = record("urn:air:a", None);
-    store
+    let mut version = store
         .put_entry(
             &c,
             &r,
@@ -1497,15 +1497,16 @@ pub async fn overwrite_replaces_a_record_of_either_mode(store: &dyn CatalogStore
         curated(),
     ] {
         let etag = store
-            .put_entry(&c, &changed, &provenance, Condition::Overwrite)
+            .put_entry(&c, &changed, &provenance, Condition::Overwrite(version))
             .await
             .unwrap();
         assert_eq!(etag, Etag::of_entry(&changed, &provenance).unwrap());
         let got = store.get_entry(&c, &r.key()).await.unwrap().unwrap();
         assert_eq!(
-            (got.record.bytes(), got.provenance, got.etag),
+            (got.record.bytes(), got.provenance, got.etag.clone()),
             (changed.bytes(), provenance, etag)
         );
+        version = got.etag;
     }
     // A replace adds no entry and no guard.
     assert_eq!(store.count_catalog(&c).await.unwrap(), counts(0, 1, 1, 0));
@@ -1523,28 +1524,61 @@ pub async fn overwrite_replaces_a_record_of_either_mode(store: &dyn CatalogStore
         .unwrap();
 }
 
-pub async fn overwrite_of_a_missing_key_creates_as_any(store: &dyn CatalogStore) {
-    let c = id("overwrite-of-a-missing-key-creates-as-any");
+pub async fn overwrite_requires_the_stored_version(store: &dyn CatalogStore) {
+    let c = id("overwrite-requires-the-stored-version");
     let r = record("urn:air:k", None);
-    let etag = store
-        .put_entry(&c, &r, &curated(), Condition::Overwrite)
-        .await
-        .unwrap();
-    let got = store.get_entry(&c, &r.key()).await.unwrap().unwrap();
-    assert_eq!((got.provenance, got.etag), (curated(), etag));
-    assert_eq!(store.count_catalog(&c).await.unwrap(), counts(0, 1, 1, 0));
+    let stale = Etag::of_entry(&r, &curated_by("someone")).unwrap();
+    // A key with no record is refused, not created.
     assert_eq!(
         store
-            .put_entry(
-                &c,
-                &record("urn:air:k", Some("1")),
-                &curated(),
-                Condition::Overwrite
-            )
+            .put_entry(&c, &r, &curated(), Condition::Overwrite(stale.clone()))
             .await,
-        kind_conflict("urn:air:k")
+        Err(StoreError::PreconditionFailed)
     );
+    assert_eq!(store.count_catalog(&c).await.unwrap().total(), 0);
+    let held = lease("svc", "2030-01-01T00:00:00Z");
+    let etag = store
+        .put_entry(&c, &r, &held, Condition::Absent)
+        .await
+        .unwrap();
+    // A record whose version differs is left as it is.
+    assert_eq!(
+        store
+            .put_entry(&c, &r, &curated(), Condition::Overwrite(stale))
+            .await,
+        Err(StoreError::PreconditionFailed)
+    );
+    let got = store.get_entry(&c, &r.key()).await.unwrap().unwrap();
+    assert_eq!((got.provenance, got.etag), (held, etag));
     assert_eq!(store.count_catalog(&c).await.unwrap(), counts(0, 1, 1, 0));
+}
+
+pub async fn overwrite_of_a_host_requires_its_version(store: &dyn CatalogStore) {
+    let c = id("overwrite-of-a-host-requires-its-version");
+    let stale = Etag::of(b"stale");
+    assert_eq!(
+        store
+            .put_host(&c, &host(), Condition::Overwrite(stale.clone()))
+            .await,
+        Err(StoreError::PreconditionFailed)
+    );
+    assert!(store.get_host(&c).await.unwrap().is_none());
+    let etag = store
+        .put_host(&c, &host(), Condition::Absent)
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .put_host(&c, &host(), Condition::Overwrite(stale))
+            .await,
+        Err(StoreError::PreconditionFailed)
+    );
+    assert_eq!(store.get_host(&c).await.unwrap().unwrap().etag, etag);
+    let again = store
+        .put_host(&c, &host(), Condition::Overwrite(etag))
+        .await
+        .unwrap();
+    assert_eq!(store.get_host(&c).await.unwrap().unwrap().etag, again);
 }
 
 pub async fn scan_entries_matches_list_entries(store: &dyn CatalogStore) {
@@ -1607,7 +1641,12 @@ pub async fn unreadable_items_are_scanned_and_overwritten(
         Err(StoreError::CorruptProvenance { .. })
     ));
     let new = store
-        .put_entry(c, raw, &curated_by("fresh"), Condition::Overwrite)
+        .put_entry(
+            c,
+            raw,
+            &curated_by("fresh"),
+            Condition::Overwrite(etag.clone()),
+        )
         .await
         .unwrap();
     assert_eq!(new, Etag::of_entry(raw, &curated_by("fresh")).unwrap());

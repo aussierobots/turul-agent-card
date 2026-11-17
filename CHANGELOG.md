@@ -5,6 +5,22 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.0.24] - 2026-11-18
+
+### Changed
+
+- `Condition::Overwrite` carries the expected version: `Overwrite(etag)` replaces a record of any mode or readability only while it is stored at that version, and fails `PreconditionFailed` on a missing key or another version. It no longer creates; use `Absent` or `Any` for that.
+- `ImportMode::Replace` no longer overwrites a lease registered or refreshed after its scan: each document entry is written conditioned on the version the scan saw (or on its absence), so such a lease stops the import with `StoreError::PreconditionFailed`, and re-running refuses it as a live lease (see ADR-017).
+- `turul-ai-catalog store purge --yes` refuses while `TURUL_AI_CATALOG_ID` is unset, so the refusal of the served id no longer depends on the operator having set it. The preview still runs without it.
+
+### Compatibility
+
+- A `CatalogStore` implemented outside this crate must handle `Condition::Overwrite(expected)` as described. The stored format is unchanged; no upgrade step.
+
+### Verification
+
+- The parity suite runs the conditioned overwrite against in-memory, SQLite, PostgreSQL and DynamoDB Local.
+
 ## [0.0.23] - 2026-11-18
 
 ### Added

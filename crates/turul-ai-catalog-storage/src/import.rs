@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -94,12 +94,13 @@ impl std::error::Error for ImportError {}
 /// [`ImportMode::Replace`] makes the catalog id hold exactly the document, in this order. It
 /// scans the stored entries, reading no more than their keys, versions and provenance, and
 /// refuses with [`ImportError::LiveLeases`] before any write when a lease is live. It overwrites
-/// the host (a document without one leaves the stored host), overwrites or adds each document
-/// entry as curated by `writer` without reading the old record, deletes each scanned entry the
-/// document lacks, conditioned on its scanned version, and last creates the entries whose
-/// identifier changed version kind. A concurrent assembly therefore never loses a document entry
-/// the id already held. Not atomic; re-running converges. Writers of the id should be stopped
-/// first: a lease registered after the scan under a document key is overwritten.
+/// the host (a document without one leaves the stored host), overwrites each document entry the
+/// scan held, conditioned on its scanned version and without reading the old record, creates each
+/// one the scan lacked, deletes each scanned entry the document lacks, conditioned on its scanned
+/// version, and last creates the entries whose identifier changed version kind. A concurrent
+/// assembly therefore never loses a document entry the id already held, and a record registered
+/// or refreshed after the scan is never overwritten: its write fails with
+/// [`StoreError::PreconditionFailed`] and the import stops. Not atomic; re-running converges.
 ///
 /// # Errors
 ///
@@ -111,7 +112,7 @@ impl std::error::Error for ImportError {}
 /// entry's key holds a lease; [`ImportError::OwnedByAnotherWriter`] when it holds a curated record
 /// of another writer; [`ImportError::LiveLeases`] in `Replace` while a lease is live. In `Replace`,
 /// [`StoreError::Corrupt`] when a stored record does not parse, and
-/// [`StoreError::PreconditionFailed`] when a record to delete changed after the scan.
+/// [`StoreError::PreconditionFailed`] when a record to write or delete changed after the scan.
 ///
 /// # Examples
 ///
@@ -273,9 +274,17 @@ async fn replace(
     order.sort_by_key(|&i| entries[i].key());
     let mut written: Vec<Option<Etag>> = vec![None; entries.len()];
     let mut deferred = Vec::new();
+    // Each write is conditioned on what the scan saw: a key the scan held must still hold that
+    // version, and a key it lacked must still be empty, so a record registered or refreshed after
+    // the scan stops the import instead of being overwritten.
+    let seen: BTreeMap<&EntryKey, &Etag> = scanned.iter().map(|s| (&s.key, &s.etag)).collect();
     for &i in &order {
+        let condition = match seen.get(&entries[i].key()) {
+            Some(&etag) => Condition::Overwrite(etag.clone()),
+            None => Condition::Absent,
+        };
         match store
-            .put_entry(catalog, &entries[i], &provenance, Condition::Overwrite)
+            .put_entry(catalog, &entries[i], &provenance, condition)
             .await
         {
             Ok(etag) => written[i] = Some(etag),
@@ -303,7 +312,7 @@ async fn replace(
     for i in deferred {
         written[i] = Some(
             store
-                .put_entry(catalog, &entries[i], &provenance, Condition::Overwrite)
+                .put_entry(catalog, &entries[i], &provenance, Condition::Absent)
                 .await
                 .map_err(ImportError::Store)?,
         );

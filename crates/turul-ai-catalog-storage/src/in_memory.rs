@@ -95,9 +95,9 @@ impl InMemoryCatalogStore {
     ) -> Result<(), StoreError> {
         let current = map.records.get(slot).map(|s| &s.etag);
         let allowed = match condition {
-            Condition::Any | Condition::Overwrite => true,
+            Condition::Any => true,
             Condition::Absent => current.is_none(),
-            Condition::Matches(e) => current == Some(e),
+            Condition::Matches(e) | Condition::Overwrite(e) => current == Some(e),
         };
         if allowed {
             Ok(())
@@ -136,7 +136,7 @@ impl CatalogStore for InMemoryCatalogStore {
         let mut map = self.records.write().map_err(poisoned)?;
         Self::check_condition(&map, &slot, &condition)?;
         let created = !map.records.contains_key(&slot);
-        if condition != Condition::Overwrite
+        if !matches!(condition, Condition::Overwrite(_))
             && let Some(stored) = map.records.get(&slot).and_then(|s| s.provenance.as_ref())
             && stored.1 != provenance.kind()
         {
