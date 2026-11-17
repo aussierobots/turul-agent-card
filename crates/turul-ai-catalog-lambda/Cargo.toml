@@ -1,6 +1,6 @@
 [package]
 name = "turul-ai-catalog-lambda"
-description = "AWS Lambda handler serving a bundled AI Catalog at the well-known URI"
+description = "AWS Lambda handler serving an AI Catalog assembled from a catalog store at the well-known URI"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -24,14 +24,20 @@ required-features = ["local"]
 
 [features]
 local = ["dep:axum", "tokio/net", "tokio/signal"]
+dynamodb = ["dep:aws-config", "dep:aws-sdk-dynamodb", "turul-ai-catalog-storage/dynamodb"]
 
 [dependencies]
 turul-ai-catalog = { workspace = true }
+turul-ai-catalog-storage = { workspace = true }
 lambda_http = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true, optional = true }
+aws-config = { workspace = true, optional = true }
+aws-sdk-dynamodb = { workspace = true, optional = true }
 
 [dev-dependencies]
+futures = { workspace = true }
+async-trait = { workspace = true }
 turul-ai-catalog-client = { workspace = true }
 ai-catalog = { workspace = true }
 ai-catalog-validate = { workspace = true }

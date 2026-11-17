@@ -45,16 +45,17 @@ Publishing is irreversible. Never run `cargo publish` without explicit instructi
 
 ## Architecture
 
-Crate structure, owning symbols and dependency direction are decided in ADRs under `docs/adr/`. Six crates:
+Crate structure, owning symbols and dependency direction are decided in ADRs under `docs/adr/`. Seven crates:
 
 - `turul-ai-catalog`: the format and nothing else; no network or async. Owns `parse`, `validate`/`validate_at`, `to_canonical_vec`, `Timestamp`, `DigestValue`, the `resolve` display functions (ADR-002 to ADR-007).
 - `turul-ai-catalog-client`: consumer logic over the core. Owns `fetch`, `load`, `ResolvedCatalog`, `Filter` and `produce` (ADR-008, ADR-009, ADR-011).
 - `turul-ai-catalog-tui`: ratatui view over `ResolvedCatalog`. Owns `render`, `run` (ADR-011).
 - `turul-ai-catalog-cli`: binary `turul-ai-catalog`: `validate`, `list`, `view`, `init`, `add`, `remove`. Thin; no catalog logic (ADR-011).
 - `turul-ai-catalog-trust`: signing and verification as a library (`turul-jwt-validator`). Owns `sign_manifest`, `sign_catalog`, `verify_signature`, `verify_resolved` (ADR-012 to ADR-015).
-- `turul-ai-catalog-lambda`: serves the bundled catalog at `/.well-known/ai-catalog.json`. Owns `ServedCatalog::load` and `handle` (ADR-010).
+- `turul-ai-catalog-storage`: entry-level catalog storage. Owns `CatalogStore`, `EntryRecord`/`HostRecord` (the record gate), `CatalogId`, `RecordKey`, `Etag`, `assemble` and `import`; backends `in-memory` (default), `sqlite`, `postgres`, `dynamodb` as features (ADR-016).
+- `turul-ai-catalog-lambda`: serves the catalog assembled from a store at `/.well-known/ai-catalog.json`. Owns `ServedCatalog::assemble`, `SnapshotCache` and `handle` (ADR-010, ADR-016).
 
-Dependency direction: `client` -> core; `tui` -> core, `client`; `cli` -> core, `client`, `tui`; `trust` -> core, `client`; `lambda` -> core, `client`. Nothing depends on `cli`; `lambda` never depends on `cli` or `trust`.
+Dependency direction: `client` -> core; `tui` -> core, `client`; `cli` -> core, `client`, `tui`; `trust` -> core, `client`; `storage` -> core; `lambda` -> core, `storage`. Nothing depends on `cli`; `storage` and `lambda` never depend on `client`, `cli` or `trust`.
 
 Local server: `cargo run -p turul-ai-catalog-lambda --features local --bin turul-ai-catalog-serve -- --file ai-catalog.json --addr 127.0.0.1:8080`. Lambda locally: `cargo lambda watch -p turul-ai-catalog-lambda`. Features agreed but not started: `docs/plan/TODO.md`.
 

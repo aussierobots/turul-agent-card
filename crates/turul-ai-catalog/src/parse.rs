@@ -76,6 +76,16 @@ pub fn parse(input: &[u8]) -> Result<AiCatalog, ParseError> {
     catalog(&json::read(input)?, &JsonPointer::root())
 }
 
+/// Parses one catalog entry: the same member reader `parse` applies to `entries[i]`.
+pub fn parse_entry(input: &[u8]) -> Result<CatalogEntry, ParseError> {
+    entry(&json::read(input)?, &JsonPointer::root())
+}
+
+/// Parses Host Info: the same member reader `parse` applies to `host`.
+pub fn parse_host(input: &[u8]) -> Result<HostInfo, ParseError> {
+    host(&json::read(input)?, &JsonPointer::root())
+}
+
 /// A read value to the model: object check, version gate, then `document`. `p` is the
 /// pointer of `v`, so every error carries its full pointer.
 pub(crate) fn catalog(v: &Json, p: &JsonPointer) -> Result<AiCatalog, ParseError> {

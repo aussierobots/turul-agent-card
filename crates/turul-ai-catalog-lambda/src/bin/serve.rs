@@ -4,9 +4,9 @@
 //! turul-ai-catalog-serve [--file PATH] [--addr HOST:PORT]
 //! ```
 //!
-//! Serves PATH (default: the bundled catalog) at `/.well-known/ai-catalog.json` on
-//! `127.0.0.1:8080` by default. The file passes the same validation gate as Lambda cold start,
-//! and every request is answered by the same `handle`.
+//! Imports PATH into an in-memory catalog store (default: an empty store) and serves the assembled
+//! catalog at `/.well-known/ai-catalog.json` on `127.0.0.1:8080` by default. The catalog passes the
+//! same assembly gate as Lambda cold start, and every request is answered by the same `handle`.
 
 use std::net::SocketAddr;
 use std::process::ExitCode;
@@ -16,7 +16,9 @@ use axum::extract::Request as AxumRequest;
 use axum::response::Response as AxumResponse;
 use lambda_http::Body;
 use turul_ai_catalog::identity::WELL_KNOWN_PATH;
-use turul_ai_catalog_lambda::{BUNDLE, ServedCatalog, handle};
+use turul_ai_catalog::parse::parse;
+use turul_ai_catalog_lambda::{ServedCatalog, handle};
+use turul_ai_catalog_storage::{CatalogId, InMemoryCatalogStore, import};
 
 const USAGE: &str = "usage: turul-ai-catalog-serve [--file PATH] [--addr HOST:PORT]";
 
@@ -29,17 +31,29 @@ async fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let bytes: &'static [u8] = match &file {
-        None => BUNDLE,
-        Some(path) => match std::fs::read(path) {
-            Ok(b) => Box::leak(b.into_boxed_slice()),
+    let store = InMemoryCatalogStore::new();
+    let catalog = CatalogId::new("default").expect("a valid catalog id");
+    if let Some(path) = &file {
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
             Err(e) => {
                 eprintln!("cannot read {path}: {e}");
                 return ExitCode::from(2);
             }
-        },
-    };
-    let served: &'static ServedCatalog = match ServedCatalog::load(bytes) {
+        };
+        let document = match parse(&bytes) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("{path} does not parse: {e} at '{}'", e.pointer);
+                return ExitCode::from(1);
+            }
+        };
+        if let Err(e) = import(&store, &catalog, &document).await {
+            eprintln!("cannot load {path}: {e}");
+            return ExitCode::from(1);
+        }
+    }
+    let served: &'static ServedCatalog = match ServedCatalog::assemble(&store, &catalog).await {
         Ok(s) => Box::leak(Box::new(s)),
         Err(e) => {
             eprintln!("{e}");
@@ -55,7 +69,7 @@ async fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let source = file.as_deref().unwrap_or("bundled catalog");
+    let source = file.as_deref().unwrap_or("an empty catalog");
     eprintln!("serving {source} at http://{addr}{WELL_KNOWN_PATH}");
     let shutdown = async {
         let _ = tokio::signal::ctrl_c().await;

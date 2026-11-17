@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use turul_ai_catalog::identity::{ArtifactType, EntryIdentifier};
+use turul_ai_catalog::identity::{ArtifactType, EntryIdentifier, EntryKey};
 use turul_ai_catalog::validate::{Diagnostic, Severity};
 use turul_ai_catalog_client::{
     Change, Child, Content, DisplayText, EntryInput, FetchPolicy, Filter, HostInput, LoadError,
@@ -226,10 +226,7 @@ fn run(command: Command) -> u8 {
             version,
         } => produced(
             &file,
-            &Change::Remove {
-                identifier,
-                version,
-            },
+            &Change::Remove(EntryKey::new(EntryIdentifier::new(identifier), version)),
         ),
     }
 }

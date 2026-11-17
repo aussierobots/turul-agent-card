@@ -2,13 +2,15 @@
 
 mod support;
 
-use support::{body_bytes, request};
+use support::{body_bytes, request, served_from};
 use turul_ai_catalog::identity::{MEDIA_TYPE, WELL_KNOWN_PATH};
 use turul_ai_catalog::json::{Json, read};
 use turul_ai_catalog_client::{Fetched, accept_response};
-use turul_ai_catalog_lambda::{BUNDLE, ServedCatalog, handle};
+use turul_ai_catalog_lambda::handle;
 
-const SPEC_EXAMPLE: &[u8] = include_bytes!("fixtures/ai-catalog.json");
+const SPEC_EXAMPLE: &str = include_str!("fixtures/ai-catalog.json");
+
+const MINIMAL: &str = r#"{"specVersion":"1.0","entries":[{"identifier":"urn:example:a","type":"application/a2a-agent-card+json","url":"https://example.com/a.json"}]}"#;
 
 fn field<'a>(json: &'a Json, name: &str) -> Option<&'a Json> {
     match json {
@@ -36,11 +38,8 @@ fn values(json: &Json) -> Vec<Option<Json>> {
 // #well-known-uri, #location-independence
 #[test]
 fn client_and_sdk_accept_the_served_catalog_and_agree_on_values() {
-    for bytes in [BUNDLE, SPEC_EXAMPLE] {
-        let served = match ServedCatalog::load(bytes) {
-            Ok(s) => s,
-            Err(e) => panic!("fixture must load: {e}"),
-        };
+    for document in [MINIMAL, SPEC_EXAMPLE] {
+        let served = served_from(document);
         let r = handle(&served, &request("GET", WELL_KNOWN_PATH));
         let content_type = r
             .headers()

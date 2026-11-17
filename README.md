@@ -50,7 +50,8 @@ keeps its own schema, and the catalog adds discovery, publisher and trust inform
 | [`turul-ai-catalog-cli`](crates/turul-ai-catalog-cli) | The `turul-ai-catalog` binary: `init`, `add`, `remove`, `validate`, `list`, `view`. |
 | [`turul-ai-catalog-tui`](crates/turul-ai-catalog-tui) | The terminal catalog browser behind `turul-ai-catalog view` ([ratatui](https://ratatui.rs)). |
 | [`turul-ai-catalog-trust`](crates/turul-ai-catalog-trust) | Trust Manifests: signed payloads, artifact digests, ES256 signing and `did:web` verification, through [turul-jwt-validator](https://github.com/aussierobots/turul-jwt-validator). |
-| [`turul-ai-catalog-lambda`](crates/turul-ai-catalog-lambda) | An AWS Lambda handler that serves a bundled catalog at `/.well-known/ai-catalog.json`. |
+| [`turul-ai-catalog-storage`](crates/turul-ai-catalog-storage) | Library: entry-level catalog storage with content-derived ETags and conditional writes, assembly of the served document, and `import` of a catalog file. Backends `in-memory` (default), `sqlite`, `postgres` and `dynamodb` as features. |
+| [`turul-ai-catalog-lambda`](crates/turul-ai-catalog-lambda) | An AWS Lambda handler that serves the catalog assembled from a `turul-ai-catalog-storage` store at `/.well-known/ai-catalog.json`. |
 
 ## Quick start
 
@@ -120,13 +121,21 @@ as a test.
 
 ## Serving a catalog
 
-`turul-ai-catalog-lambda` serves `crates/turul-ai-catalog-lambda/catalog.json` at
-`/.well-known/ai-catalog.json` with `Content-Type: application/ai-catalog+json`. The bundle is
-validated at cold start, and the function fails to start if it has errors. Create or change the
-bundle with the CLI (`init`, `add`, `remove`), never by hand. Deployment (IAM, SAM, CDK) belongs to
-the deploying project.
+`turul-ai-catalog-lambda` serves the catalog assembled from a `turul-ai-catalog-storage` store at
+`/.well-known/ai-catalog.json` with `Content-Type: application/ai-catalog+json`. The assembled
+document is validated at cold start, and the function fails to start if it has errors. A warm
+instance re-assembles when its snapshot is older than `TURUL_AI_CATALOG_MAX_AGE_SECS` (default 60)
+and keeps the last good snapshot if a refresh fails.
 
-To serve any catalog file on a local HTTP port while developing, run the same handler as a plain
+Built with the `dynamodb` feature, the function reads the table named by `TURUL_AI_CATALOG_TABLE`
+and the catalog named by `TURUL_AI_CATALOG_ID`, and fails to start if either is missing. Built
+without it, it serves an empty in-memory store. Load a curated catalog file (made with the CLI
+`init`, `add` and `remove`) into a store with `turul_ai_catalog_storage::import`; services that
+register themselves write through `EntryRecord::new` and `CatalogStore::put_entry`. The deploying
+project owns the table, the function and every grant (IAM, SAM, CDK): the serving role needs
+`dynamodb:GetItem` and `dynamodb:Query`, writers need `dynamodb:PutItem` and `dynamodb:DeleteItem`.
+
+To serve a catalog file on a local HTTP port while developing, run the same handler as a plain
 server:
 
 ```sh
@@ -135,10 +144,11 @@ cargo run -p turul-ai-catalog-lambda --features local --bin turul-ai-catalog-ser
 curl -i http://127.0.0.1:8080/.well-known/ai-catalog.json
 ```
 
-The file is validated first, exactly as at Lambda cold start, and the responses are identical.
-To run the Lambda itself locally instead, use
-[cargo-lambda](https://www.cargo-lambda.info): `cargo lambda watch -p turul-ai-catalog-lambda`.
-AI Catalog clients, this one included, refuse plain `http://` and loopback addresses under the
+The file is imported into an in-memory store and assembled exactly as at Lambda cold start, and
+the responses are identical; without `--file` the server serves an empty catalog. To run the Lambda
+itself locally instead, use [cargo-lambda](https://www.cargo-lambda.info):
+`cargo lambda watch -p turul-ai-catalog-lambda`, which serves an empty in-memory catalog. AI Catalog
+clients, this one included, refuse plain `http://` and loopback addresses under the
 specification's Safe Fetching rules, so check a local server with `curl` or a browser.
 
 ## Specification conformance

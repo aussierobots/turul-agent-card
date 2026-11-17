@@ -181,24 +181,51 @@ fn cli_dependencies_are_exactly_the_allowed_set() {
     assert!(dev.is_empty(), "{dev:?}");
 }
 
-// the lambda serves a compiled-in bundle; it never depends on the client or the trust crate.
-// `axum` exists only for the local development server, behind the optional `local` feature.
+// the lambda serves a catalog assembled from a store; it never depends on the client or the trust
+// crate. `axum` exists only for the local development server (feature `local`); `aws-config` and
+// `aws-sdk-dynamodb` only for the DynamoDB backend (feature `dynamodb`).
 #[test]
 fn lambda_dependencies_are_exactly_the_allowed_set() {
     let (normal, dev) = dependencies("turul-ai-catalog-lambda");
     assert_eq!(
         normal,
-        set(&["turul-ai-catalog", "lambda_http", "tokio", "axum"])
+        set(&[
+            "turul-ai-catalog",
+            "turul-ai-catalog-storage",
+            "lambda_http",
+            "tokio",
+            "axum",
+            "aws-config",
+            "aws-sdk-dynamodb"
+        ])
     );
-    assert_eq!(optional("turul-ai-catalog-lambda"), set(&["axum"]));
+    assert_eq!(
+        optional("turul-ai-catalog-lambda"),
+        set(&["axum", "aws-config", "aws-sdk-dynamodb"])
+    );
     assert_eq!(
         dev,
         set(&[
             "turul-ai-catalog-client",
             "ai-catalog",
-            "ai-catalog-validate"
+            "ai-catalog-validate",
+            "futures",
+            "async-trait"
         ])
     );
+}
+
+// the storage crate's default features add no runtime or network dependency, never the client or
+// trust crate, and the format crate keeps zero dependencies.
+#[test]
+fn storage_default_features_add_no_runtime_or_network_dependency() {
+    let (normal, _) = dependencies("turul-ai-catalog-storage");
+    let optional = optional("turul-ai-catalog-storage");
+    assert_eq!(optional, set(&["sqlx", "aws-sdk-dynamodb"]));
+    let always: std::collections::BTreeSet<_> = normal.difference(&optional).cloned().collect();
+    assert_eq!(always, set(&["turul-ai-catalog", "async-trait", "sha2"]));
+    let (core, _) = dependencies("turul-ai-catalog");
+    assert!(core.is_empty(), "{core:?}");
 }
 
 // #embedded-content-safety: nothing in a front end or the lambda touches the network, the file

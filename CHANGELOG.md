@@ -5,6 +5,31 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.0.17] - 2026-11-17
+
+### Added
+
+- `turul-ai-catalog-storage`: the `CatalogStore` trait, the record gate, entry assembly and `import`, with backends behind features: `in-memory` (default), `sqlite`, `postgres` and `dynamodb`. Every backend passes the same parity suite. See ADR-016.
+- `turul-ai-catalog-lambda` feature `dynamodb`: serve a catalog from a DynamoDB-backed store.
+
+### Changed
+
+- `turul-ai-catalog-lambda` serves an AI Catalog assembled from a catalog store at the well-known URI instead of a bundled `catalog.json`; the bundled file is removed. See ADR-016.
+- `turul-ai-catalog-serve` (the local server in `turul-ai-catalog-lambda`): `--file` goes through `import` and `assemble`; there is no default bundle. See ADR-016.
+- A warm Lambda instance re-assembles a snapshot older than `TURUL_AI_CATALOG_MAX_AGE_SECS` (default 60); a failed refresh keeps the last good snapshot, is written to stderr, and is retried once per max age rather than on every request.
+
+### Removed
+
+- The bundle provenance check in `turul-ai-catalog-cli` and the bundled Lambda catalog.
+
+### Compatibility
+
+- The store does not enforce the spec rule that an unversioned entry's `identifier` alone is unique. A put of an unversioned entry beside versioned entries of the same identifier (or the reverse) is accepted, and every assembly of that catalog then fails: new Lambda instances fail to start and warm ones keep their last snapshot until the record is deleted. See ADR-016.
+
+### Verification
+
+- fmt, clippy `-D warnings` (workspace and all storage features), test, the DynamoDB-local parity test and `cargo doc` pass.
+
 ## [0.0.16] - 2026-11-17
 
 ### Added

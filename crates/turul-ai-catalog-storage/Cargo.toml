@@ -1,0 +1,29 @@
+[package]
+name = "turul-ai-catalog-storage"
+description = "Storage for AI Catalog entries: the CatalogStore trait, record gate, assembly and backends"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+rust-version.workspace = true
+publish = true
+
+[features]
+default = ["in-memory"]
+in-memory = []
+sqlite = ["dep:sqlx", "sqlx/sqlite"]
+postgres = ["dep:sqlx", "sqlx/postgres", "sqlx/tls-rustls"]
+dynamodb = ["dep:aws-sdk-dynamodb"]
+
+[dependencies]
+turul-ai-catalog = { workspace = true }
+async-trait = { workspace = true }
+sha2 = { workspace = true }
+sqlx = { workspace = true, optional = true }
+aws-sdk-dynamodb = { workspace = true, optional = true }
+
+[dev-dependencies]
+futures = { workspace = true }
+tokio = { workspace = true }

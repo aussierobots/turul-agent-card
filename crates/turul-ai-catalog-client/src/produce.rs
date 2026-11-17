@@ -10,7 +10,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use turul_ai_catalog::canonical::{CanonicalError, to_canonical_vec};
-use turul_ai_catalog::identity::{ArtifactType, EntryIdentifier, HostIdentifier};
+use turul_ai_catalog::identity::{ArtifactType, EntryIdentifier, EntryKey, HostIdentifier};
 use turul_ai_catalog::json;
 use turul_ai_catalog::model::{AiCatalog, ArtifactSource, CatalogEntry, HostInfo};
 use turul_ai_catalog::parse::{ParseError, parse};
@@ -20,14 +20,9 @@ use turul_ai_catalog::validate::{Report, validate};
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Change {
-    Init {
-        host: Option<HostInput>,
-    },
+    Init { host: Option<HostInput> },
     Add(EntryInput),
-    Remove {
-        identifier: String,
-        version: Option<String>,
-    },
+    Remove(EntryKey),
 }
 
 /// Unchecked host flags; `display_name` is required because `host.displayName` MUST be present.
@@ -135,7 +130,7 @@ pub fn produce(path: &Path, change: &Change) -> Result<Report, ProduceError> {
             }
             AiCatalog::new(Vec::new())
         }
-        Change::Add(_) | Change::Remove { .. } => {
+        Change::Add(_) | Change::Remove(_) => {
             let bytes = fs::read(path).map_err(ProduceError::Io)?;
             let catalog = parse(&bytes).map_err(ProduceError::Parse)?;
             if catalog.signature.is_some() {
@@ -184,15 +179,9 @@ fn apply(catalog: &mut AiCatalog, change: &Change) -> Result<(), ProduceError> {
             entry.tags = (!input.tags.is_empty()).then(|| input.tags.clone());
             catalog.entries.push(entry);
         }
-        Change::Remove {
-            identifier,
-            version,
-        } => {
+        Change::Remove(key) => {
             let before = catalog.entries.len();
-            catalog.entries.retain(|e| {
-                let key = e.key();
-                !(key.identifier().as_str() == identifier && key.version() == version.as_deref())
-            });
+            catalog.entries.retain(|e| e.key() != *key);
             if catalog.entries.len() == before {
                 return Err(ProduceError::NoMatch);
             }

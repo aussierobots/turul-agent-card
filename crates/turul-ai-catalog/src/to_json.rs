@@ -71,7 +71,8 @@ impl AiCatalog {
 }
 
 impl HostInfo {
-    fn to_json(&self) -> Json {
+    /// The Host Info as a `Json` value.
+    pub fn to_json(&self) -> Json {
         let mut o = Out::new(&self.unrecognized, names::HOST);
         o.text("displayName", &self.display_name);
         if let Some(i) = &self.identifier {
@@ -84,7 +85,8 @@ impl HostInfo {
 }
 
 impl CatalogEntry {
-    fn to_json(&self) -> Json {
+    /// The entry as a `Json` value.
+    pub fn to_json(&self) -> Json {
         let mut o = Out::new(&self.unrecognized, names::ENTRY);
         o.text("identifier", self.identifier.as_str());
         o.opt_text("displayName", &self.display_name);

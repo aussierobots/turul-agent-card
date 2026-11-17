@@ -67,7 +67,7 @@ impl ArtifactType {
 }
 
 /// The identity of an entry: `identifier` and `version` as written (#multi-version-entries).
-/// Built only by [`CatalogEntry::key`].
+/// Built only by [`EntryKey::new`], which [`CatalogEntry::key`] calls.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct EntryKey {
     identifier: EntryIdentifier,
@@ -75,11 +75,15 @@ pub struct EntryKey {
 }
 
 impl EntryKey {
-    pub(crate) fn of(entry: &CatalogEntry) -> Self {
+    pub fn new(identifier: EntryIdentifier, version: Option<String>) -> Self {
         Self {
-            identifier: entry.identifier.clone(),
-            version: entry.version.clone(),
+            identifier,
+            version,
         }
+    }
+
+    pub(crate) fn of(entry: &CatalogEntry) -> Self {
+        Self::new(entry.identifier.clone(), entry.version.clone())
     }
 
     pub fn identifier(&self) -> &EntryIdentifier {

@@ -1,110 +1,199 @@
-//! Cold-start gate contract: `ServedCatalog::load` over the bundle and over variants.
+//! Cold-start contract: `ServedCatalog::assemble` over a store, and the configuration that selects it.
 
 mod support;
 
-use support::{body_bytes, leak, request};
-use turul_ai_catalog::identity::WELL_KNOWN_PATH;
-use turul_ai_catalog::json::{Json, read};
-use turul_ai_catalog::parse::{ParseErrorKind, parse};
-use turul_ai_catalog::validate::{Conformance, ConformanceLevel, Severity, validate};
-use turul_ai_catalog_lambda::{BUNDLE, ColdStartError, ServedCatalog, handle};
+use async_trait::async_trait;
+use futures::executor::block_on;
+use support::{body_bytes, catalog_id, request, served_from, store_with};
+use turul_ai_catalog::identity::{EntryKey, WELL_KNOWN_PATH};
+use turul_ai_catalog::parse::parse;
+use turul_ai_catalog::validate::{Conformance, Severity, validate};
+use turul_ai_catalog_lambda::{
+    ColdStartError, ServedCatalog, catalog_id as id_from, handle, max_age,
+};
+use turul_ai_catalog_storage::{
+    AssembleError, CatalogId, CatalogStore, Condition, EntryRecord, Etag, HostRecord, ImportError,
+    InMemoryCatalogStore, StoreError, Stored, import,
+};
 
 const SPEC_EXAMPLE: &str = include_str!("fixtures/ai-catalog.json");
 
-type Case = (&'static [u8], fn(&ParseErrorKind) -> bool, &'static str);
-
 const ENTRY: &str = r#"{"identifier":"urn:example:a","type":"application/a2a-agent-card+json","url":"https://example.com/a.json"}"#;
 
-fn doc(entry: &str) -> &'static [u8] {
-    leak(format!(r#"{{"specVersion":"1.0","entries":[{entry}]}}"#))
+fn doc(entry: &str) -> String {
+    format!(r#"{{"specVersion":"1.0","entries":[{entry}]}}"#)
 }
 
 /// The spec example with its one signature's `jws` replaced.
-fn with_jws(jws: &str) -> &'static [u8] {
+fn with_jws(jws: &str) -> String {
     let start = SPEC_EXAMPLE.find(r#""jws": ""#).expect("jws member") + r#""jws": ""#.len();
     let end = start + SPEC_EXAMPLE[start..].find('"').expect("jws end");
-    leak(format!(
-        "{}{}{}",
-        &SPEC_EXAMPLE[..start],
-        jws,
-        &SPEC_EXAMPLE[end..]
-    ))
+    format!("{}{}{}", &SPEC_EXAMPLE[..start], jws, &SPEC_EXAMPLE[end..])
 }
 
-fn assert_starts_and_serves(bytes: &'static [u8]) {
-    let served = match ServedCatalog::load(bytes) {
-        Ok(s) => s,
-        Err(e) => panic!("must start: {e}"),
-    };
+fn assert_starts_and_serves(document: &str) {
+    let served = served_from(document);
     let r = handle(&served, &request("GET", WELL_KNOWN_PATH));
     assert_eq!(r.status().as_u16(), 200);
-    assert_eq!(body_bytes(&r), bytes);
+    let body = body_bytes(&r);
+    assert!(!validate(&parse(&body).expect("body parses")).has_errors());
 }
 
-fn member<'a>(json: &'a Json, name: &str) -> &'a Json {
-    match json {
-        Json::Object(m) => m.get(name).unwrap_or_else(|| panic!("member {name}")),
-        other => panic!("not an object: {other:?}"),
+/// A store that fails every read.
+struct Unreachable;
+
+#[async_trait]
+impl CatalogStore for Unreachable {
+    fn backend_name(&self) -> &'static str {
+        "unreachable"
+    }
+    async fn put_entry(
+        &self,
+        _: &CatalogId,
+        _: &EntryRecord,
+        _: Condition,
+    ) -> Result<Etag, StoreError> {
+        Err(StoreError::Backend("unreachable".into()))
+    }
+    async fn get_entry(
+        &self,
+        _: &CatalogId,
+        _: &EntryKey,
+    ) -> Result<Option<Stored<EntryRecord>>, StoreError> {
+        Err(StoreError::Backend("unreachable".into()))
+    }
+    async fn delete_entry(
+        &self,
+        _: &CatalogId,
+        _: &EntryKey,
+        _: Option<&Etag>,
+    ) -> Result<(), StoreError> {
+        Err(StoreError::Backend("unreachable".into()))
+    }
+    async fn list_entries(&self, _: &CatalogId) -> Result<Vec<Stored<EntryRecord>>, StoreError> {
+        Err(StoreError::Backend("unreachable".into()))
+    }
+    async fn put_host(
+        &self,
+        _: &CatalogId,
+        _: &HostRecord,
+        _: Condition,
+    ) -> Result<Etag, StoreError> {
+        Err(StoreError::Backend("unreachable".into()))
+    }
+    async fn get_host(&self, _: &CatalogId) -> Result<Option<Stored<HostRecord>>, StoreError> {
+        Err(StoreError::Backend("unreachable".into()))
     }
 }
 
-fn entry_triples(json: &Json) -> Vec<(Json, Json, Json)> {
-    match member(json, "entries") {
-        Json::Array(items) => items
-            .iter()
-            .map(|e| {
-                (
-                    member(e, "identifier").clone(),
-                    member(e, "type").clone(),
-                    member(e, "url").clone(),
-                )
-            })
-            .collect(),
-        other => panic!("entries not an array: {other:?}"),
-    }
-}
-
-// #level-1-minimal-catalog, #catalog-entry: an entry with an empty identifier is an error.
+// #top-level-structure: `entries` "MAY be empty", so an empty store is a valid catalog.
 #[test]
-fn bundle_with_an_error_diagnostic_fails_cold_start() {
-    let bytes = doc(
-        r#"{"identifier":"","type":"application/a2a-agent-card+json","url":"https://example.com/a.json"}"#,
-    );
-    match ServedCatalog::load(bytes) {
-        Err(ColdStartError::Invalid(report)) => assert!(report.has_errors()),
+fn empty_store_serves_a_valid_empty_catalog() {
+    let served = block_on(ServedCatalog::assemble(
+        &InMemoryCatalogStore::new(),
+        &catalog_id(),
+    ))
+    .expect("empty store assembles");
+    let r = handle(&served, &request("GET", WELL_KNOWN_PATH));
+    assert_eq!(body_bytes(&r), br#"{"entries":[],"specVersion":"1.0"}"#);
+}
+
+// #multi-version-entries: an unversioned entry beside a versioned one breaks uniqueness, which only
+// the whole document shows.
+#[test]
+fn invalid_store_fails_cold_start() {
+    let a = doc(&ENTRY.replace("}", r#","version":"1"}"#));
+    let store = store_with(&a);
+    let unversioned: turul_ai_catalog::model::CatalogEntry = parse(doc(ENTRY).as_bytes())
+        .expect("parses")
+        .entries
+        .remove(0);
+    block_on(store.put_entry(
+        &catalog_id(),
+        &EntryRecord::new(unversioned).expect("entry passes the record gate"),
+        Condition::Any,
+    ))
+    .expect("put");
+    match block_on(ServedCatalog::assemble(&store, &catalog_id())) {
+        Err(ColdStartError::Assemble(AssembleError::Invalid(report))) => {
+            assert!(report.has_errors())
+        }
         Err(e) => panic!("wrong error: {e}"),
         Ok(_) => panic!("an error diagnostic must fail cold start"),
     }
+    match block_on(ServedCatalog::assemble(&Unreachable, &catalog_id())) {
+        Err(ColdStartError::Assemble(AssembleError::Store(StoreError::Backend(_)))) => {}
+        Err(e) => panic!("wrong error: {e}"),
+        Ok(_) => panic!("an unreachable store must fail cold start"),
+    }
 }
 
-// #media-type-registration-application-ai-catalog-json: the document MUST contain `specVersion` and `entries`.
 #[test]
-fn unparseable_bundle_fails_cold_start() {
-    let cases: [Case; 3] = [
-        (b"{", |k| matches!(k, ParseErrorKind::Syntax), ""),
-        (
-            br#"{"specVersion":"1.0"}"#,
-            |k| matches!(k, ParseErrorKind::MissingMember),
-            "/entries",
-        ),
-        (
-            br#"{"specVersion":"2.0","entries":[]}"#,
-            |k| matches!(k, ParseErrorKind::UnsupportedMajor { .. }),
-            "/specVersion",
-        ),
-    ];
-    for (bytes, is_kind, pointer) in cases {
-        match ServedCatalog::load(bytes) {
-            Err(ColdStartError::Parse(e)) => {
-                assert!(is_kind(&e.kind), "{bytes:?}: {:?}", e.kind);
-                if !pointer.is_empty() {
-                    assert_eq!(e.pointer.to_string(), pointer, "{bytes:?}");
-                }
-            }
-            Err(e) => panic!("wrong error: {e}"),
-            Ok(_) => panic!("{bytes:?} must fail cold start"),
+fn cold_start_error_names_each_error_code_and_pointer() {
+    let store = store_with(&doc(&ENTRY.replace("}", r#","version":"1"}"#)));
+    let unversioned = parse(doc(ENTRY).as_bytes())
+        .expect("parses")
+        .entries
+        .remove(0);
+    block_on(store.put_entry(
+        &catalog_id(),
+        &EntryRecord::new(unversioned).expect("record"),
+        Condition::Any,
+    ))
+    .expect("put");
+    let Err(err) = block_on(ServedCatalog::assemble(&store, &catalog_id())) else {
+        panic!("must fail cold start");
+    };
+    let ColdStartError::Assemble(AssembleError::Invalid(report)) = &err else {
+        panic!("wrong error: {err}");
+    };
+    let text = err.to_string();
+    let errors: Vec<_> = report
+        .diagnostics()
+        .iter()
+        .filter(|d| d.severity == Severity::Error)
+        .collect();
+    assert!(!errors.is_empty());
+    for d in errors {
+        assert!(text.contains(d.code.as_str()), "{text}");
+        assert!(text.contains(&d.path.to_string()), "{text}");
+    }
+}
+
+#[cfg(feature = "dynamodb")]
+#[test]
+fn missing_table_configuration_fails_cold_start() {
+    use turul_ai_catalog_lambda::table_name;
+    for raw in [None, Some("")] {
+        match table_name(raw) {
+            Err(ColdStartError::Config(m)) => assert!(m.contains("TURUL_AI_CATALOG_TABLE"), "{m}"),
+            other => panic!("{other:?}"),
         }
     }
+    assert_eq!(table_name(Some("t")).expect("named"), "t");
+    match id_from(None) {
+        Err(ColdStartError::Config(m)) => assert!(m.contains("TURUL_AI_CATALOG_ID"), "{m}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn catalog_id_and_refresh_interval_are_validated() {
+    assert_eq!(id_from(Some("prod.v1")).expect("valid").as_str(), "prod.v1");
+    assert!(matches!(
+        id_from(Some("a b")),
+        Err(ColdStartError::Config(_))
+    ));
+    assert_eq!(max_age(None).expect("default").as_secs(), 60);
+    assert_eq!(max_age(Some("0")).expect("zero").as_secs(), 0);
+    assert!(matches!(
+        max_age(Some("soon")),
+        Err(ColdStartError::Config(_))
+    ));
+    assert!(matches!(
+        max_age(Some("-1")),
+        Err(ColdStartError::Config(_))
+    ));
 }
 
 // #cddl-schema "digest": an unknown algorithm is a warning; #catalog-entry nesting limit gives Undetermined.
@@ -114,7 +203,7 @@ fn warnings_do_not_fail_cold_start() {
         r#"{{"identifier":"urn:example:a","type":"application/a2a-agent-card+json","url":"https://example.com/a.json","digest":"sha3-256:{}"}}"#,
         "a".repeat(64)
     ));
-    let report = validate(&parse(unknown_digest).expect("parses"));
+    let report = validate(&parse(unknown_digest.as_bytes()).expect("parses"));
     assert!(
         report
             .diagnostics()
@@ -122,7 +211,7 @@ fn warnings_do_not_fail_cold_start() {
             .any(|d| d.code.as_str() == "digest-algorithm-unknown"
                 && d.severity == Severity::Warning)
     );
-    assert_starts_and_serves(unknown_digest);
+    assert_starts_and_serves(&unknown_digest);
 
     // Root plus four nested inline catalogs: the fifth level is not descended.
     let mut nested = format!(r#"{{"specVersion":"1.0","entries":[{ENTRY}]}}"#);
@@ -131,66 +220,18 @@ fn warnings_do_not_fail_cold_start() {
             r#"{{"specVersion":"1.0","entries":[{{"identifier":"urn:example:n{n}","type":"application/ai-catalog+json","data":{nested}}}]}}"#
         );
     }
-    let bytes = leak(nested);
-    let report = validate(&parse(bytes).expect("parses"));
+    let report = validate(&parse(nested.as_bytes()).expect("parses"));
     assert_eq!(report.conformance(), Conformance::Undetermined);
     assert!(!report.has_errors());
-    assert_starts_and_serves(bytes);
-}
-
-// The committed bundle passes the one gate.
-#[test]
-fn bundled_catalog_loads() {
-    if let Err(e) = ServedCatalog::load(BUNDLE) {
-        panic!("the shipped catalog.json must load: {e}");
-    }
-}
-
-// #level-2-discoverable-catalog: default content is the spec example's host and three entries.
-#[test]
-fn bundled_catalog_is_discoverable() {
-    let report = validate(&parse(BUNDLE).expect("parses"));
-    assert!(!report.has_errors(), "{:?}", report.diagnostics());
-    assert_eq!(
-        report.conformance(),
-        Conformance::Met(ConformanceLevel::Discoverable)
-    );
-    let ours = read(BUNDLE).expect("bundle reads");
-    let spec = read(SPEC_EXAMPLE.as_bytes()).expect("example reads");
-    assert_eq!(entry_triples(&ours), entry_triples(&spec));
-    assert_eq!(member(&ours, "host"), member(&spec, "host"));
-}
-
-#[test]
-fn cold_start_error_names_each_error_code_and_pointer() {
-    let bytes = doc(r#"{"identifier":"","type":"","url":"https://example.com/a.json"}"#);
-    let Err(err) = ServedCatalog::load(bytes) else {
-        panic!("must fail cold start");
-    };
-    let ColdStartError::Invalid(report) = &err else {
-        panic!("wrong error: {err}");
-    };
-    let text = err.to_string();
-    let errors: Vec<_> = report
-        .diagnostics()
-        .iter()
-        .filter(|d| d.severity == Severity::Error)
-        .collect();
-    assert!(errors.len() >= 2, "{errors:?}");
-    for d in errors {
-        assert!(text.contains(d.code.as_str()), "{text}");
-        assert!(text.contains(&d.path.to_string()), "{text}");
-    }
-    assert!(text.contains("identifier-empty") && text.contains("/entries/0/identifier"));
-    assert!(text.contains("type-empty") && text.contains("/entries/0/type"));
+    assert_starts_and_serves(&nested);
 }
 
 // #signed-payload-and-jws-construction, #did-web: header and signer shape are never checked by the format crate.
 #[test]
 fn signature_defects_do_not_fail_cold_start() {
     // base64url of `{}` and of `{"alg":"none"}`
-    assert_starts_and_serves(with_jws("e30..detached-jws-signature"));
-    assert_starts_and_serves(with_jws("eyJhbGciOiJub25lIn0..detached-jws-signature"));
+    assert_starts_and_serves(&with_jws("e30..detached-jws-signature"));
+    assert_starts_and_serves(&with_jws("eyJhbGciOiJub25lIn0..detached-jws-signature"));
     // `contributor` changes with `signer`: #contributor-identity "MUST exactly equal" stays met, so
     // the only defect is the `did:web` signer shape.
     let signer = SPEC_EXAMPLE
@@ -205,39 +246,29 @@ fn signature_defects_do_not_fail_cold_start() {
             1,
         );
     assert_eq!(signer.matches("did:web:Example.com").count(), 2);
-    assert_starts_and_serves(leak(signer));
-}
-
-// #cddl-schema: a Signature requires `signer`, `profile`, `issuedAt` and `jws`.
-#[test]
-fn signature_missing_a_required_member_fails_cold_start() {
-    let missing = SPEC_EXAMPLE.replacen(r#""profile": "did-web-v1","#, "", 1);
-    assert_ne!(missing, SPEC_EXAMPLE);
-    match ServedCatalog::load(leak(missing)) {
-        Err(ColdStartError::Parse(e)) => {
-            assert_eq!(e.kind, ParseErrorKind::MissingMember);
-            assert_eq!(
-                e.pointer.to_string(),
-                "/entries/0/trustManifests/0/signature/profile"
-            );
-        }
-        Err(e) => panic!("wrong error: {e}"),
-        Ok(_) => panic!("a missing signature member must fail cold start"),
-    }
+    assert_starts_and_serves(&signer);
 }
 
 // #nested-catalog-entries: a `url`-nested catalog is a separate document and is not fetched.
 #[test]
 fn url_nested_children_are_not_fetched_at_cold_start() {
-    assert_starts_and_serves(doc(
+    assert_starts_and_serves(&doc(
         r#"{"identifier":"urn:example:child","type":"application/ai-catalog+json","url":"https://127.0.0.1/x.json"}"#,
     ));
 }
 
-// #signed-payload-and-jws-construction: I-JSON is required of signed objects only.
+// #signed-payload-and-jws-construction: the served bytes are canonical, so a number that is not
+// I-JSON never reaches the store.
 #[test]
-fn non_i_json_numbers_outside_signed_objects_do_not_fail_cold_start() {
-    assert_starts_and_serves(doc(
-        r#"{"identifier":"urn:example:a","type":"application/vnd.example+json","data":{"n":1e400}}"#,
+fn non_i_json_numbers_are_refused_before_they_can_be_served() {
+    let document = parse(
+        doc(r#"{"identifier":"urn:example:a","type":"application/vnd.example+json","data":{"n":1e400}}"#)
+            .as_bytes(),
+    )
+    .expect("parses");
+    let store = InMemoryCatalogStore::new();
+    assert!(matches!(
+        block_on(import(&store, &catalog_id(), &document)),
+        Err(ImportError::Record(_))
     ));
 }

@@ -115,7 +115,7 @@ The binding text is `docs/plan/DECISIONS.md`; the accepted asks are in PLAN §0b
 | Id | Effect |
 |---|---|
 | M1 | Workspace `turul-agent-card`; format crate `turul-ai-catalog`, with no network or async dependency |
-| M2 | `turul-ai-catalog-lambda` serves one bundled catalog at the well-known path (D18) |
+| M2 | `turul-ai-catalog-lambda` serves one bundled catalog at the well-known path (D18); the bundle is superseded by M19, and the Lambda serves a catalog assembled from a store (ADR-016) |
 | M3 | `turul-ai-catalog-client` owns consumer logic; the CLI and TUI are thin (D10, D12, D13) |
 | M4 | Interop tests at every boundary; ai-catalog-rust is a dev-dependency only |
 | M5 | Own model (D1) |
@@ -272,3 +272,4 @@ No derived artifact with golden bytes belongs to this ADR.
 | 2026-11-17 | S2: round-trip half of `spec_examples` named (`every_parsed_spec_example_round_trips`, ADR-003 law 1). RD-40 (ai-catalog-trust number canonicalisation) is decided in ADR-003 and pinned by `i_json_numbers`; S7 excludes those documents from the canonicalize law. |
 | 2026-11-17 | S7: §8 SDK interop added. `=0.4.0` dev-dependencies on `ai-catalog`, `ai-catalog-validate`, `ai-catalog-trust` (D15). Accept/reject defined (§8.1). Interop corpus of 11 fixtures (§8.2). Per-file outcomes observed against 0.4.0 (§8.3): disagreements are RD-01, RD-02, RD-04, RD-08, RD-12, RD-13, RD-14, RD-15; blocks 12 and 16 are refused by both. Cross round-trip and canonicalize laws (§8.4), with RD-02 and RD-03 as the only theirs → ours inequalities; the RD-40 exclusion set is empty. Spec fixture list and wrapping rules move to `tests/common/spec_corpus.rs` (§8.5). |
 | 2026-11-17 | M20 (ADR-003 AMB-94): our writer is exactly RFC 8785, so RD-40 is closed: `serde_jcs` 0.2 also writes integers through `f64`, and both give the same bytes for every finite number. §6 drops RD-40; §8.4 law 3 excludes only numbers that are not finite doubles; `sdk_interop::numbers_canonicalise_as_ai_catalog_trust_does` added. |
+| 2026-11-17 | §7 M2 marked superseded in part by M19: the Lambda serves a store-assembled catalog, not a bundle (ADR-016). |
