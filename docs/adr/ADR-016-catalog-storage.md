@@ -8,7 +8,7 @@
 
 ## Context
 
-M19 approves `turul-ai-catalog-storage`: a `CatalogStore` trait holding entry-level records with ETag versions, backends `in-memory`, `sqlite`, `postgres` and `dynamodb` as cargo features following `turul-mcp-task-storage`, and the Lambda serving from the store instead of the M2 bundle, so services can register entries at runtime. Whether turul-a2a and turul-mcp services actually do so is open (TODO F1); this ADR builds what holds either way.
+M19 approves `turul-ai-catalog-storage`: a `CatalogStore` trait holding entry-level records with ETag versions, backends `in-memory`, `sqlite`, `postgres` and `dynamodb` as cargo features following `turul-mcp-task-storage`, and the Lambda serving from the store instead of the M2 bundle, so services can register entries at runtime. Who registers, under what authority, and entry lifecycle are ADR-017's (M26); this ADR builds the storage both curated and registered entries go through.
 
 The pattern followed: `turul-mcp-task-storage` has one `#[async_trait]` trait (`TaskStorage: Send + Sync`, `backend_name()`), an in-memory default, `sqlite`/`postgres`/`dynamodb` as features each pulling its own client crate, and one shared set of parity functions taking `&dyn TaskStorage` that every backend runs. Its DynamoDB backend never creates tables unless told to. Two things are not copied: the task status state machine (a catalog entry has no lifecycle in the spec), and parity tests compiled inside `src/` (here they are an integration-test module, so they test only the public API).
 
@@ -38,7 +38,7 @@ Spec text this ADR implements:
 | `in-memory` (default) | nothing | no | no |
 | `sqlite` | `sqlx` (`sqlite`, `runtime-tokio`; tokio comes through it) | no (local file) | yes |
 | `postgres` | `sqlx` (`postgres`, `runtime-tokio`, `tls-rustls`), `tokio` | yes | yes |
-| `dynamodb` | `aws-sdk-dynamodb` (its Tokio runtime support supplies tokio; the caller builds the `Client`, with `aws-config` in the deploying binary) | yes | yes |
+| `dynamodb` | `aws-sdk-dynamodb` (the caller builds the `Client`, with `aws-config` in the deploying binary), `tokio` (`time`, the timer of the retry backoff, §6) | yes | yes |
 
 - M6 holds: `turul-ai-catalog` gains no dependency. Its new public items (§2) are pure.
 - `dependency_direction` pins: the storage crate's default-feature dependency set is exactly `{turul-ai-catalog, async-trait, sha2}`; no feature of it depends on the client or trust crate.
@@ -57,7 +57,7 @@ The store holds two record kinds per catalog: one optional host record and any n
   - host: `"h"`.
   - guard: `"g:"` followed by the lowercase hex SHA-256 of `Json::to_canonical_vec` of the JSON array `[identifier]`, built by `RecordKey::guard(&EntryIdentifier)`. One per identifier per catalog; it is never an entry or host key (a different prefix, and a one-element preimage where entry keys hash two). It names the guard that holds the identifier's version kind (§3 guarantee 6, §6).
   - Fixed length (66 bytes) for every identifier, so no backend's key-length limit (DynamoDB sort key 1024 bytes, PostgreSQL btree tuple size) depends on artifact identifiers. The readable key lives inside the record bytes.
-- **`Etag`**: the version of one stored record, the lowercase hex SHA-256 of its record bytes. It is computed by the crate (`Etag::of(&[u8])`), never by a backend, so every backend returns the same `Etag` for the same record and the parity contract can assert it. Same content gives the same `Etag`; a conditional write that matches therefore only ever replaces bytes equal to those the caller read, including after a delete and re-create (no ABA on content) (AMB-402).
+- **`Etag`**: the version of one stored record: for the host, the lowercase hex SHA-256 of its record bytes; for an entry, `Etag::of_entry(&EntryRecord, &Provenance)`, the SHA-256 of the JCS of `[entry JSON, provenance JSON]` (ADR-017 §4.2). It is computed by the crate (`Etag::of(&[u8])`), never by a backend, so every backend returns the same `Etag` for the same record and the parity contract can assert it. Same content gives the same `Etag`; a conditional write that matches therefore only ever replaces bytes equal to those the caller read, including after a delete and re-create (no ABA on content) (AMB-402).
 
 ### 3. The `CatalogStore` trait
 
@@ -66,14 +66,14 @@ The store holds two record kinds per catalog: one optional host record and any n
 pub trait CatalogStore: Send + Sync {
     fn backend_name(&self) -> &'static str;
 
-    async fn put_entry(&self, catalog: &CatalogId, record: &EntryRecord, condition: Condition)
+    async fn put_entry(&self, catalog: &CatalogId, record: &EntryRecord, provenance: &Provenance, condition: Condition)
         -> Result<Etag, StoreError>;
     async fn get_entry(&self, catalog: &CatalogId, key: &EntryKey)
-        -> Result<Option<Stored<EntryRecord>>, StoreError>;
+        -> Result<Option<StoredEntry>, StoreError>;
     async fn delete_entry(&self, catalog: &CatalogId, key: &EntryKey, expected: Option<&Etag>)
         -> Result<(), StoreError>;
     async fn list_entries(&self, catalog: &CatalogId)
-        -> Result<Vec<Stored<EntryRecord>>, StoreError>;
+        -> Result<Vec<StoredEntry>, StoreError>;
 
     async fn put_host(&self, catalog: &CatalogId, record: &HostRecord, condition: Condition)
         -> Result<Etag, StoreError>;
@@ -82,44 +82,50 @@ pub trait CatalogStore: Send + Sync {
 }
 
 pub enum Condition { Any, Absent, Matches(Etag) }
-pub struct Stored<R> { pub record: R, pub etag: Etag }
+pub struct Stored<R> { pub record: R, pub etag: Etag }                       // the host
+pub struct StoredEntry { pub record: EntryRecord, pub provenance: Provenance, pub etag: Etag }
 
 #[non_exhaustive]
 pub enum StoreError {
     PreconditionFailed,                      // Absent but present; Matches but absent or different
     NotFound,                                // delete of a missing record with `expected: None`
     VersionKindConflict { identifier: EntryIdentifier }, // a new entry beside entries of the other version kind
+    ModeConflict { stored: ModeKind },       // a put that would replace a record of the other mode (guarantee 8)
+    CorruptProvenance { key: RecordKey, error: ProvenanceError }, // provenance missing, not parsing, or of an unknown mode; or a put's provenance that would not read back
     Corrupt { key: RecordKey, error: ParseError },
+    Contended,                               // concurrent transactions conflicted on every attempt (DynamoDB, §6)
     Backend(String),                         // the backend's own error, as text
 }
 ```
 
 - `assemble` is **not** a trait method: it is the free function in §4, so no backend can override it and the served document has one builder (AMB-403).
-- There is no status, no TTL, no expiry and no lease. A record exists or it does not. Entry lifecycle beyond put and delete (refresh, expiry of a service that stopped) is F1's.
+- The trait holds no status, no TTL and no clock. Each entry is stored with the `Provenance` it was put with (its mode, writer and, for a lease, expiry); lifecycle (registration, refresh, expiry, ownership) is decided above the trait by ADR-017 (§3 to §6), and assembly applies expiry (§4).
+- A stored entry whose mode is missing or unknown is `CorruptProvenance` on every backend, never `Backend` text: on a read when its provenance bytes do not parse, and on a put over it when the stored mode does not name `lease` or `curated`. A put whose provenance would not read back (`Provenance::to_bytes` refuses it, e.g. an expiry past year 9999) is refused with `CorruptProvenance` before the store is touched, so no backend stores a record its own reads would refuse.
 - `delete_entry` with `expected: Some(etag)` fails `PreconditionFailed` when the record is absent or its `Etag` differs. No `delete_host` is added: no writer in this workspace removes a host, and `put_host` replaces one.
 
 What **every backend must guarantee** (the parity contract, §6):
 
 1. **Atomic conditional write.** `put_*` and `delete_entry` evaluate their condition and write as one indivisible step against the record's current committed state. Of two concurrent `Condition::Absent` puts of one key, exactly one succeeds; of two concurrent `Matches(e)` puts, at most one succeeds.
 2. **Read-your-writes.** After a write returns `Ok`, every later `get_*` and `list_entries` on the same store observes it (strongly consistent reads; DynamoDB `ConsistentRead = true`).
-3. **Record integrity.** A read returns exactly the record bytes written, so `Stored.etag == Etag::of(bytes)`. A backend never reformats, truncates or partially writes a record.
+3. **Record integrity.** A read returns exactly the record bytes written, so a host's `Stored.etag == Etag::of(bytes)` and an entry's `StoredEntry.etag == Etag::of_entry(record, provenance)`. A backend never reformats, truncates or partially writes a record.
 4. **Complete listing.** `list_entries` returns every entry record of the catalog committed before the call began, each once, following every backend page. Order is unspecified (§4 sorts).
 5. **Catalog isolation.** No operation on one `CatalogId` reads or changes another's records.
 6. **Uniqueness by key and by version kind.** At most one entry record per `RecordKey` per catalog, which enforces the first #multi-version-entries rule, "the combination of `identifier` and `version` MUST be unique". And no identifier has both an unversioned and a versioned entry record, which enforces the second, "When `version` is absent, `identifier` alone MUST be unique" (M21): `put_entry` of a record that does not yet exist fails `VersionKindConflict { identifier }` when its identifier already has stored entry records of the other version kind (`version` absent versus present; `Some("")` is present). The check and the write are one atomic step, as in guarantee 1: of two concurrent puts of `a` and `a@1`, at most one succeeds. Order: a failed `Condition` is `PreconditionFailed` first, so only a new record can conflict; a replace keeps its key and therefore its kind. `delete_entry` keeps the identifier's state in the same step, so deleting its last record of a kind frees it for the other kind. Each backend holds this in a per-identifier guard (§6) keyed by `RecordKey::guard`; the guard is internal and never listed or read through the trait.
 7. **No snapshot across records.** Not guaranteed: `list_entries` is not required to be one isolated snapshot with `get_host`. Each record read is a committed version.
+8. **Mode exclusion** (ADR-017 §4.3). A `put_entry` that would replace a record whose `ModeKind` differs from the new provenance's fails `StoreError::ModeConflict { stored }`, evaluated and written in one atomic step. Order of checks: `PreconditionFailed`, then `ModeConflict`, then `VersionKindConflict`. Proved by `parity::lease_and_curated_puts_refuse_each_other` and `parity::racing_cross_mode_puts_leave_one_mode`.
 
 ### 4. Assembly on read
 
-`pub async fn assemble(store: &dyn CatalogStore, catalog: &CatalogId) -> Result<Assembled, AssembleError>` is the one owner of the served document:
+`pub async fn assemble(store: &dyn CatalogStore, catalog: &CatalogId, now: SystemTime) -> Result<Assembled, AssembleError>` is the one owner of the served document:
 
-1. `get_host` and `list_entries`.
+1. `get_host` and `list_entries`. Leases with `now >= expires_at` move to `Assembled::omitted` as `OmissionReason::LeaseExpired` (ADR-017 §6).
 2. Sort the entries ascending by `EntryKey`'s derived `Ord`: `identifier` by bytes, then `version` with absent before present, present versions by bytes (AMB-404).
 3. Build `AiCatalog { spec_version: SPEC_VERSION, host, entries, signature: None, additional_signatures: None, extensions: None, unrecognized: empty }`.
-4. `validate`; any `Severity::Error` gives `AssembleError::Invalid(Report)`.
+4. `validate`; on any `Severity::Error`, each entry that fails validation on its own moves to `omitted` as `OmissionReason::Invalid(Report)` and the document is validated again; errors that remain give `AssembleError::Invalid(Report)`.
 5. `to_canonical_vec`; a `CanonicalError` gives `AssembleError::NotIJson`.
-6. Return `Assembled { bytes: Vec<u8>, report: Report }` (warnings only).
+6. Return `Assembled { bytes, report, omitted, next_expiry }`: `report` has warnings only, every listed record is in `bytes` or `omitted`, and `next_expiry` is the earliest expiry among the leases in `bytes`.
 
-Store errors give `AssembleError::Store(StoreError)`. Step 4 stays although guarantee 6 now keeps cross-entry errors out of every backend: a store written before the guard existed (0.0.17) may hold an unversioned entry beside versioned ones, and a `CatalogStore` implemented outside this crate may not keep the guarantee; assembly refuses such a document rather than serve it. The result is a pure function of the committed records: equal store state gives equal bytes on every backend, which the parity contract asserts byte for byte. A store with no records assembles to `{"entries":[],"specVersion":"1.0"}`, a valid Level 1 document (#top-level-structure: `entries` "MAY be empty").
+Store errors give `AssembleError::Store(StoreError)`. Step 4 stays although guarantee 6 now keeps cross-entry errors out of every backend: a store written before the guard existed (0.0.17) may hold an unversioned entry beside versioned ones, and a `CatalogStore` implemented outside this crate may not keep the guarantee; assembly refuses such a document rather than serve it. The result is a pure function of the committed records and `now`: equal store state and equal `now` give equal bytes on every backend, which the parity contract asserts byte for byte. A store with no records assembles to `{"entries":[],"specVersion":"1.0"}`, a valid Level 1 document (#top-level-structure: `entries` "MAY be empty").
 
 **Catalog-level `signature` (#catalog-snapshot-coverage).** An assembled document never carries `signature` or `additionalSignatures`. The catalog signature covers "every entry in order, Host Info, extensions, and all other present members", and "adding, removing, or changing a contribution … requires a new catalog signature": every store write changes the snapshot, so a stored signature would be invalid after the next write, and signing each assembly would put a signing key in the serving path, which M10 and M19 do not grant. Therefore:
 
@@ -132,7 +138,7 @@ Store errors give `AssembleError::Store(StoreError)`. Step 4 stays although guar
 
 - never assigns, rewrites or normalises an identifier: an `EntryRecord` holds the identifier the writer gave, so rule 1 ("MUST preserve it exactly") holds for anything the writer passes through;
 - keys only on `(identifier, version)`, so replaced source identifiers kept in a namespaced entry extension "do not participate in catalog uniqueness", as required;
-- does not decide publisher authorization, identifier assignment (rules 2 and 3) or stability across versions and URL changes ("MUST NOT be reassigned to another artifact"). Those are the writer's obligations, and the store cannot check them: it has no history of what an identifier named before. Who the writer is, and with what authority, is F1;
+- does not decide publisher authorization, identifier assignment (rules 2 and 3) or stability across versions and URL changes ("MUST NOT be reassigned to another artifact"). Those are the writer's obligations, and the store cannot check them: it has no history of what an identifier named before. Who the writer is, and with what authority, is ADR-017 (§2, §3);
 - states the operator through `put_host` (#catalog-projection: "The operator is the entity identified by the top-level `host` field").
 
 Requests vary nothing: the same store state is served to every caller, so the Lambda performs no #dynamic-discovery.
@@ -141,11 +147,11 @@ Requests vary nothing: the same store state is served to every caller, so the La
 
 - **One gate, two targets.** "Change → validate → write" has one validation owner, `validate` and `to_canonical_vec` (ADR-005, ADR-003), reached by two writers that each own one target:
   - file: `turul_ai_catalog_client::produce` (M17, ADR-011), unchanged except for `Remove` comparing `EntryKey`s (§2);
-  - store: `EntryRecord::new` / `HostRecord::new` followed by a conditional `put_*` or `delete_entry`. The record gate is the store's validate step; a writer cannot reach a backend without passing it.
+  - store: `EntryRecord::new` / `HostRecord::new` followed by a conditional `put_*` or `delete_entry`; entry writes go through ADR-017's `write_owned` (`import`, `Registrar::register`). The record gate is the store's validate step; a writer cannot reach a backend without passing it.
   
   `produce` gains no store target: it is synchronous and lives in the client crate, which carries the network dependency, and a store target would make every store writer (services, the Lambda) depend on the client (AMB-406).
-- **`import(store: &dyn CatalogStore, catalog: &CatalogId, document: &AiCatalog) -> Result<Vec<Etag>, ImportError>`** is the one path from a catalog document to store records: it refuses a signed document or one with top-level members the store cannot hold (§4), gates the host and each entry, then writes the host and each entry with `Condition::Any`. It is how a curated catalog file (made with the M17 producer commands) is loaded into a store, and how the local server seeds its in-memory store (§7). It is not atomic across records; a failure part-way leaves the records written so far, and re-running it converges. A document with an unversioned and a versioned entry of one identifier fails at the second of them with `ImportError::Store(StoreError::VersionKindConflict)`.
-- **Runtime registration** by turul-a2a and turul-mcp services, if F1 decides for it, goes through this crate's public API only: build the entry with the `turul-ai-catalog` model, `EntryRecord::new`, `put_entry` (`Condition::Absent` to create, `Matches` to replace), `delete_entry` to deregister. Those repos depend on `turul-ai-catalog-storage` and implement nothing of it (workspace boundary, CLAUDE.md). Their work goes in handoffs once F1 is decided.
+- **`import(store: &dyn CatalogStore, catalog: &CatalogId, document: &AiCatalog, writer: &WriterId) -> Result<Vec<Etag>, ImportError>`** is the one path from a catalog document to store records: it refuses a signed document or one with top-level members the store cannot hold (§4), gates the host and each entry, then writes the host with `Condition::Any` and each entry as a curated record of `writer` through ADR-017's crate-private `write_owned` (read, then `Condition::Absent` or `Matches`; ADR-017 §4.3, §4.5). It refuses an entry whose key holds a lease (`ImportError::Store(StoreError::ModeConflict)`) or another writer's curated record (`ImportError::OwnedByAnotherWriter`), and reports a record other writers kept changing as `ImportError::Store(StoreError::Contended)`. It is how a curated catalog file (made with the M17 producer commands) is loaded into a store, and how the local server seeds its in-memory store (§7). It is not atomic across records; a failure part-way leaves the records written so far, and re-running it converges. A document with an unversioned and a versioned entry of one identifier fails at the second of them with `ImportError::Store(StoreError::VersionKindConflict)`.
+- **Runtime registration** is ADR-017's `Registrar`, over this crate's public API only. Consumers depend on `turul-ai-catalog-storage` and implement nothing of it (workspace boundary, CLAUDE.md).
 
 ### 6. Backends and the parity contract
 
@@ -153,15 +159,17 @@ Each backend is one public type with an async constructor taking its own config.
 
 | Backend | Type | Storage shape |
 |---|---|---|
-| `in-memory` | `InMemoryCatalogStore::new()` | `RwLock` over two maps: records `BTreeMap<(CatalogId, RecordKey), (Vec<u8>, Etag)>` and guards `BTreeMap<(CatalogId, RecordKey), (bool, usize)>` (version kind, entry count); every write holds the one write lock |
+| `in-memory` | `InMemoryCatalogStore::new()` | `RwLock` over two maps: records `BTreeMap<(CatalogId, RecordKey), Slot>` (bytes, `Etag`, and for an entry its provenance bytes and `ModeKind`) and guards `BTreeMap<(CatalogId, RecordKey), (bool, usize)>` (version kind, entry count); every write holds the one write lock |
 | `sqlite` | `SqliteCatalogStore::connect(path)` | table `catalog_records (catalog_id TEXT NOT NULL, record_key TEXT NOT NULL, record BLOB NOT NULL, etag TEXT NOT NULL, PRIMARY KEY (catalog_id, record_key))` and table `catalog_guards (catalog_id TEXT NOT NULL, guard_key TEXT NOT NULL, versioned INTEGER NOT NULL, entries INTEGER NOT NULL, PRIMARY KEY (catalog_id, guard_key))`; both created if missing on connect (a local file the process owns) |
 | `postgres` | `PostgresCatalogStore::connect(url)` | the same tables with `record BYTEA`, `versioned BOOLEAN`, `entries BIGINT`; `CREATE TABLE IF NOT EXISTS` on connect, so the role needs that privilege or the tables pre-created |
 | `dynamodb` | `DynamoDbCatalogStore::new(client, table_name)` | one table, partition key `pk` (S) = `CatalogId`, sort key `sk` (S) = `RecordKey` (`"h"`, `"e:<hex>"` or `"g:<hex>"`); record items have `record` (B) and `etag` (S); guard items have `versioned` (BOOL) and `entries` (N). Never creates or verifies the table |
 
 - Host puts: SQL uses `INSERT … ON CONFLICT DO NOTHING` for `Absent`, `UPDATE … WHERE etag = $e` for `Matches`, and checks the affected-row count; DynamoDB uses `ConditionExpression` `attribute_not_exists(pk)` for `Absent` and `etag = :e` for `Matches`, mapping `ConditionalCheckFailedException` to `PreconditionFailed`.
+- Entry provenance and mode (guarantee 8; ADR-017 §4.6): SQL `catalog_records` has `provenance` and `mode` columns with a `CHECK` that a host row has neither and an entry row has both, and `connect` fails on a table without them; a DynamoDB entry item has `provenance` (B) and `mode` (S), and its replace condition tests `#mode`.
 - Entry writes and the version-kind guard (guarantee 6). A guard exists while its identifier has at least one counted entry record; it holds the identifier's kind (`versioned`) and that count (`entries`).
   - SQL: one transaction per `put_entry` and `delete_entry` (sqlite `BEGIN IMMEDIATE`; postgres the default `READ COMMITTED`). Its first statement locks the guard row: `INSERT INTO catalog_guards … VALUES (…, versioned, 0) ON CONFLICT (catalog_id, guard_key) DO UPDATE SET entries = catalog_guards.entries RETURNING versioned, entries`, which inserts or row-locks it until commit, so two writers of one identifier serialise. Then the record's existence and `Condition` decide: `PreconditionFailed`; a replace (`UPDATE`, `entries` unchanged); or a create, refused with `VersionKindConflict` when `entries > 0` and `versioned` differs, otherwise `INSERT` and `entries + 1`. A delete removes the record under its condition and decrements a positive count. Each transaction ends by deleting the guard row when `entries` is 0, so a zero row never outlives the transaction that inserted it.
   - DynamoDB: a create is one `TransactWriteItems` of the record `Put` (`attribute_not_exists(pk)`) and the guard `Update` `SET versioned = :v ADD entries :1` with `attribute_not_exists(pk) OR versioned = :v`. A cancellation whose record item failed is `PreconditionFailed` for `Absent`; for `Any` it is a replace, a `PutItem` with `attribute_exists(pk)`, which never changes the kind (a record deleted meanwhile is created on the next attempt). A cancellation whose guard item failed is `VersionKindConflict`. `Matches` is a `PutItem` with `etag = :e`, unchanged. A delete reads the guard (`ConsistentRead`), then runs one `TransactWriteItems` of the record `Delete` (its condition as before) and, conditioned on the count read, a guard `Delete` (count 1), a guard `Update` `ADD entries :-1` (count above 1), or a `ConditionCheck` `attribute_not_exists(pk)` (no guard). A cancellation for the guard item, or a `TransactionConflict` reason on any item, retries; each retry follows another writer's committed change.
+  - DynamoDB retries are bounded: every write loop (create, replace, delete) makes at most 8 attempts, the bound `write_owned` uses above the trait (ADR-017 §4.3), waiting before each retry a uniformly random delay below 20 ms × 2^(retry − 1) (jittered exponential backoff, on the `tokio` timer). Exhaustion is `StoreError::Contended`, which `Registrar::register` reports as `RegistrationError::Contended`. `dynamodb::conflicts_on_every_attempt_are_contended` answers every request with a conflict and asserts 8 attempts, then `Contended`, on the create and replace paths.
   - A record written before the guard existed was never counted: a replace of it adds nothing, and a delete of it decrements only a positive count.
 - `list_entries`: SQL `WHERE catalog_id = $1 AND record_key LIKE 'e:%'`; DynamoDB `Query` on `pk = :c AND begins_with(sk, "e:")` with `ConsistentRead`, following `LastEvaluatedKey` to the end. Guards are never listed.
 - Record size: DynamoDB refuses items over 400 KB, which an entry with large inline `data` can exceed; that is `StoreError::Backend` naming the limit. No backend caps size below its native limit.
@@ -170,8 +178,8 @@ The parity contract is `tests/parity/mod.rs`: `pub async fn` checks taking `&dyn
 
 ### 7. The Lambda (supersedes M2's bundle; changes ADR-010)
 
-- **Serving.** `main` builds the store, then `ServedCatalog::assemble(store: &dyn CatalogStore, catalog: &CatalogId) -> Result<ServedCatalog, ColdStartError>`, which calls `assemble` and holds the bytes. An `AssembleError` fails cold start exactly as an invalid bundle did. No `put_entry` through this crate's backends can store a #multi-version-entries conflict (§3 guarantee 6); a store written before the guard existed that holds one fails assembly (§4) and so fails init until the record is removed. `handle(&ServedCatalog, &Request)` stays pure and unchanged in routing, status codes, headers and `Content-Type`; the GET body is the assembled bytes.
-- **Freshness.** `SnapshotCache` (lambda lib) holds an `Arc<ServedCatalog>` and the instant it was assembled. On a request, when its age is at least `max_age`, `main` re-assembles before calling `handle`; a failed re-assembly keeps serving the last good snapshot, and `SnapshotCache::current` returns the failure beside it; `main` writes it to stderr (CloudWatch Logs on Lambda). A failed refresh restarts the snapshot's age, so while the failure lasts the store is read and the failure logged once per `max_age` per instance, not on every request (`snapshot_refresh::failed_refresh_is_retried_once_per_max_age`). `max_age` is `TURUL_AI_CATALOG_MAX_AGE_SECS`, default 60. The clock lives in `SnapshotCache`, never in `handle`. Trade-off: a registration becomes visible within `max_age` per warm instance, and each refresh is one `GetItem` and one `Query` per instance; cold-start-only assembly would make visibility depend on instance recycling, which defeats M19's runtime registration. `0` re-assembles on every request.
+- **Serving.** `main` builds the store, then `ServedCatalog::assemble(store: &dyn CatalogStore, catalog: &CatalogId, now: SystemTime) -> Result<ServedCatalog, ColdStartError>`, which calls `assemble` and holds the bytes. An `AssembleError` fails cold start exactly as an invalid bundle did. No `put_entry` through this crate's backends can store a #multi-version-entries conflict (§3 guarantee 6); a store written before the guard existed that holds one fails assembly (§4) and so fails init until the record is removed. `handle(&ServedCatalog, &Request)` stays pure and unchanged in routing, status codes, headers and `Content-Type`; the GET body is the assembled bytes.
+- **Freshness.** `SnapshotCache` (lambda lib) holds an `Arc<ServedCatalog>`, the instant it was last assembled or attempted, and an injected clock. On a request, when its age is at least `max_age` or the clock has reached the snapshot's `next_expiry` (ADR-017 §6), `main` re-assembles before calling `handle`; a failed re-assembly keeps serving the last good snapshot, and `SnapshotCache::current` returns the failure beside it; `main` writes it to stderr (CloudWatch Logs on Lambda). A failed refresh restarts the snapshot's age, so while the failure lasts the store is read and the failure logged once per `max_age` per instance, not on every request (`snapshot_refresh::failed_refresh_is_retried_once_per_max_age`). `max_age` is `TURUL_AI_CATALOG_MAX_AGE_SECS`, default 60. The clock lives in `SnapshotCache`, never in `handle`. Trade-off: a registration becomes visible within `max_age` per warm instance, and each refresh is one `GetItem` and one `Query` per instance; cold-start-only assembly would make visibility depend on instance recycling, which defeats M19's runtime registration. `0` re-assembles on every request.
 - **Backend selection.** Built with the lambda's `dynamodb` feature (forwarding `turul-ai-catalog-storage/dynamodb`), `main` requires `TURUL_AI_CATALOG_TABLE` and `TURUL_AI_CATALOG_ID` and fails cold start naming a missing one, so a deployed function never serves an empty in-memory store by accident. Built without it, `main` uses an empty `InMemoryCatalogStore` and `TURUL_AI_CATALOG_ID` defaults to `default`; `cargo lambda watch` keeps working and serves the empty valid catalog.
 - **Local server (M18).** `turul-ai-catalog-serve --file PATH` parses the file, `import`s it into an `InMemoryCatalogStore`, and serves through `ServedCatalog::assemble` and `handle`. Without `--file` it serves the empty store. It remains the only code in the crate that reads a file or binds a port.
 - **IAM.** The deploying repo owns the table, the function and every grant. The serving role needs `dynamodb:GetItem` and `dynamodb:Query` on the table only; writers need `dynamodb:PutItem`, `dynamodb:UpdateItem`, `dynamodb:DeleteItem`, `dynamodb:ConditionCheckItem` (the actions inside `TransactWriteItems`) and `dynamodb:GetItem` (the guard read before a delete). This repo ships no IAM, SAM or CDK (M2's "handler only" stands).
@@ -197,7 +205,7 @@ The parity contract is `tests/parity/mod.rs`: `pub async fn` checks taking `&dyn
 | Entry identity | `turul_ai_catalog::identity::EntryKey::new` (ADR-004); `CatalogEntry::key` | `get_entry`, `delete_entry`, `produce` `Remove` |
 | Backend record key | `RecordKey::entry(&EntryKey)`, `RecordKey::HOST` | every backend |
 | Version-kind guard key | `RecordKey::guard(&EntryIdentifier)` | every backend's `put_entry` and `delete_entry` |
-| Record version | `Etag::of(&[u8])` (SHA-256 of record bytes) | every backend, via the crate |
+| Record version | host `Etag::of(&[u8])`; entry `Etag::of_entry` | every backend, via the crate |
 | Entry record bytes | `EntryRecord::new` (`validate`, then `Json::to_canonical_vec` of `CatalogEntry::to_json`) | `put_entry` |
 | Host record bytes | `HostRecord::new` | `put_host` |
 | Record reading | `parse::parse_entry`, `parse::parse_host` (ADR-002) | every backend's reads |
@@ -206,7 +214,7 @@ The parity contract is `tests/parity/mod.rs`: `pub async fn` checks taking `&dyn
 | Document → records | `import` | curated loads, `turul-ai-catalog-serve` |
 | Served snapshot freshness | `turul_ai_catalog_lambda::SnapshotCache` | Lambda `main` |
 
-Schema digests: record bytes are ADR-003 JCS of ADR-002's member model, whose digest is ADR-003's; `RecordKey` and `Etag` are SHA-256 over JCS and record bytes. No new schema. Determinism is proved by `assembly.rs` and the parity check `same_state_assembles_to_the_same_bytes`.
+Schema digests: record bytes are ADR-003 JCS of ADR-002's member model, whose digest is ADR-003's; `RecordKey` and `Etag` are SHA-256 over JCS and record bytes. No new schema. Determinism is proved by `assembly.rs` and the parity check `same_state_and_now_assemble_to_the_same_bytes`.
 
 ## Requirement → test
 
@@ -215,7 +223,7 @@ Paths are under `crates/turul-ai-catalog-storage/tests/` unless stated. `parity:
 | Requirement | Spec text (short) | Test function |
 |---|---|---|
 | multi-version-entries-1 | `identifier` + `version` "MUST be unique" | `parity::one_record_per_entry_key` (put twice with `Any` keeps one; versions `1` and `2` of one identifier are two records; an unversioned `b` put twice is one record; the three assemble without error), `parity::same_version_kind_puts_are_accepted`, `record_keys::absent_and_empty_version_are_distinct_keys`, `record_keys::distinct_entry_keys_give_distinct_record_keys` |
-| multi-version-entries-2 | absent `version`: `identifier` alone "MUST be unique" | `parity::unversioned_entry_beside_versioned_ones_is_refused`, `parity::versioned_entry_beside_an_unversioned_one_is_refused` (`1` and `""`), `parity::deleting_the_last_record_of_a_kind_frees_the_identifier`, `parity::conditional_puts_keep_their_preconditions`, `parity::racing_version_kinds_leave_one_kind` (16 writers racing `a` against `a@k`, four rounds, end with records of one kind), `record_keys::guard_keys_are_one_per_identifier_and_never_an_entry_or_host_key`; defence in depth for stores written before the guard: `assembly::records_breaking_identifier_uniqueness_fail_assembly`, `cold_start::invalid_store_fails_cold_start`, `snapshot_refresh::cross_entry_error_keeps_the_last_good_snapshot_and_is_reported` (lambda crate) |
+| multi-version-entries-2 | absent `version`: `identifier` alone "MUST be unique" | `parity::unversioned_entry_beside_versioned_ones_is_refused`, `parity::versioned_entry_beside_an_unversioned_one_is_refused` (`1` and `""`), `parity::deleting_the_last_record_of_a_kind_frees_the_identifier`, `parity::conditional_puts_keep_their_preconditions`, `parity::racing_version_kinds_leave_one_kind` (16 writers racing `a` against `a@k`, four rounds, end with records of one kind), `record_keys::guard_keys_are_one_per_identifier_and_never_an_entry_or_host_key`; defence in depth for stores written before the guard: `assembly::cross_entry_error_still_fails_assembly`, `cold_start::invalid_store_fails_cold_start`, `snapshot_refresh::cross_entry_error_keeps_the_last_good_snapshot_and_is_reported` (lambda crate) |
 | top-level-structure-1 | `specVersion` and `entries` required; `entries` "MAY be empty" | `assembly::empty_store_assembles_to_a_valid_empty_catalog` |
 | host-info-1 | Host Info "MUST contain" `displayName` | `records::host_record_refuses_an_invalid_host` (`HostInfo` cannot be built without `displayName`, so the gate's refusals are `validate` errors and non-I-JSON; the test asserts both the refusal and that stored host bytes carry `displayName`) |
 | catalog-entry-1 | required members; exactly one of `url` or `data` | `records::entry_record_refuses_an_entry_with_an_error_diagnostic` |
@@ -229,8 +237,8 @@ Keyword sentences in the cited sections owned elsewhere or out of scope:
 
 | Requirement | Owner |
 |---|---|
-| catalog-projection-3 (MUST NOT infer authorization from URL or unsigned `publisher`) | the writer (F1); verification is ADR-015 |
-| catalog-projection-4 (operator-assigned identifier MUST remain stable, MUST NOT be reassigned) | the writer (F1); the store holds no identifier history |
+| catalog-projection-3 (MUST NOT infer authorization from URL or unsigned `publisher`) | ADR-017 §3.1 and §3.3 (only `identifier` is checked); verification is ADR-015 |
+| catalog-projection-4 (operator-assigned identifier MUST remain stable, MUST NOT be reassigned) | ADR-017 §3.3 and AMB-424 (ownership per record key); the store holds no identifier history |
 | multi-version-entries-3 (clients SHOULD sort by `version` or `updatedAt` for latest) | client, ADR-007 |
 | well-known-uri-1 (hosts MAY serve at the well-known URI) | ADR-010, `well_known_handler.rs` |
 | entry-release-coverage (version or digest change invalidates a manifest) | ADR-015 |
@@ -244,11 +252,14 @@ Maintainer decisions and ambiguities owned here:
 | M19 (atomicity) | of concurrent `Absent` puts exactly one wins | `parity::concurrent_absent_puts_have_one_winner` |
 | M21 | `put_entry` refuses a new entry beside entries of the other version kind, atomically on every backend | multi-version-entries-2 above, chiefly `parity::racing_version_kinds_leave_one_kind` |
 | M19 (read-your-writes, completeness) | a returned write is visible; listing is complete across pages | `parity::writes_are_visible_to_the_next_read`, `parity::list_returns_every_entry` (300 entries; `dynamodb.rs` also runs it with more than 1 MB of entries, so `Query` returns several pages) |
-| M19 (parity) | equal state, equal bytes on every backend | `parity::same_state_assembles_to_the_same_bytes` (asserts against a committed expected byte string, so backends are compared through it) |
+| M19 (parity) | equal state, equal bytes on every backend | `parity::same_state_and_now_assemble_to_the_same_bytes` (asserts against a committed expected byte string, so backends are compared through it) |
 | M6 | core crate unchanged in dependencies; storage default adds no runtime or network | `dependency_direction::storage_default_features_add_no_runtime_or_network_dependency` (CLI crate) |
 | M2 / M19 (Lambda) | the Lambda serves the assembled document | ADR-010's migrated `well_known_handler.rs`, `cold_start::invalid_store_fails_cold_start`, `cold_start::missing_table_configuration_fails_cold_start` (feature `dynamodb`) |
 | AMB-401 | the record gate is the only constructor | `records::entry_record_refuses_non_i_json`, `records::entry_record_bytes_are_canonical` |
-| AMB-402 | `Etag` is content-derived and backend-independent | `parity::etag_is_the_digest_of_the_record_bytes`, `parity::recreated_identical_record_has_the_same_etag` |
+| AMB-402 | `Etag` is content-derived and backend-independent | `parity::etag_is_the_digest_of_entry_and_provenance`, `parity::recreated_identical_record_has_the_same_etag` |
+| error parity | a stored mode that is missing or unknown, and a put's provenance that would not read back, are `CorruptProvenance` on every backend | `parity::provenance_that_would_not_read_back_is_refused`; `parity::unknown_stored_mode_is_corrupt_provenance`, run by `sqlite.rs`, `postgres.rs` and `dynamodb.rs` after writing such a row raw (the in-memory store holds a typed mode and cannot hold one) |
+| bounded retries | DynamoDB write loops stop after 8 attempts with `Contended` | `dynamodb::conflicts_on_every_attempt_are_contended` |
+| feature hygiene | the crate builds without default features | CI `cargo clippy -p turul-ai-catalog-storage --no-default-features --all-targets -- -D warnings` |
 | AMB-404 | entries are ordered by `EntryKey` | `assembly::entries_are_ordered_by_entry_key` (insertion order reversed, absent version before present) |
 | AMB-405 | top-level members the store cannot hold are refused on import | `import::top_level_extensions_are_refused`, `import::unrecognized_top_level_members_are_refused` |
 | AMB-407 | a failed refresh keeps the last good snapshot and reports the failure | `snapshot_refresh::stale_snapshot_is_reassembled`, `snapshot_refresh::failed_reassembly_keeps_the_last_good_snapshot` (the store's reads fail, then recover), `snapshot_refresh::cross_entry_error_keeps_the_last_good_snapshot_and_is_reported` (a store written before the guard), `snapshot_refresh::failed_refresh_is_retried_once_per_max_age`, `snapshot_refresh::fresh_snapshot_is_not_reassembled` (lambda crate) |
@@ -270,13 +281,13 @@ New ids, block AMB-400 to AMB-419:
 - Served bytes are canonical JCS, not a hand-formatted file.
 - `bundle_provenance` and the default Acme bundle go: a deployment's content is its store, loaded by `import` or by registering writers.
 - Assembly costs one host read and one listing per refresh per warm instance. Catalogs with very many entries make each refresh proportionally larger; paging the served document is not defined by the spec and is not built.
-- turul-a2a and turul-mcp-framework need nothing from this ADR until F1 decides runtime registration.
+- Consumers that register entries at runtime do so through ADR-017's `Registrar`.
 - A writer can no longer make the catalog unservable by breaking #multi-version-entries: every backend refuses the put (§3 guarantee 6). Stores written by 0.0.17 hold no guards: `put_entry` cannot see their records' kinds and a conflict they already hold stays, and assembly keeps refusing it (§4). Re-running `import`, or the registering writers, into an empty catalog or table gives them the guarantee; nothing migrates them.
 - Every entry write is a transaction over two items (record and guard), and a DynamoDB delete adds one consistent guard read. SQL deployments gain the `catalog_guards` table; DynamoDB writers gain `UpdateItem`, `ConditionCheckItem` and `GetItem` (§7).
 
-## Open question (not blocking): runtime self-registration or curated deployment
+## Closed question: runtime self-registration or curated deployment
 
-TODO F1: do turul-a2a and turul-mcp services add their own entries at runtime, or is the catalog curated with the CLI and deployed? Either way the following hold unchanged: the trait and its guarantees, records and keys, assembly and its order, the Lambda serving and cache, and the backends. Curated: the producer commands write a file, `import` loads it, and only a deployment pipeline holds write grants. Self-registration: services write through `EntryRecord::new` and conditional puts. What F1 must still decide, and this ADR does not: which services register, the authority under which they write (and who satisfies #catalog-projection's authorization and identifier-stability duties), and entry lifecycle (refresh, removal, expiry of a service that stopped). Expiry would add state to the store and is not built here.
+Closed by M26 (2026-11-17) and decided in ADR-017: both. A curated catalog is written by the producer commands, loaded by `import` and recorded `Curated`; services register leases (or, when granted, curated entries) through the `Registrar`, under a per-writer grant, with expiry applied by `assemble`. The trait, records and keys, assembly order, the Lambda and the backends of this ADR hold for both, with ADR-017's provenance and guarantee 8 added.
 
 ## Closed question: version-group conflicts at write time
 
@@ -286,7 +297,7 @@ Closed by M21 (2026-11-17): `put_entry` refuses an entry whose identifier alread
 
 - No code, tests or `Cargo.toml` changes: they follow in the implementing slice, which also updates ADR-002, ADR-003, ADR-004, ADR-010 and ADR-011 and their revision logs, `CHANGELOG.md` and the version.
 - No new maintainer decision: it implements M19 as recorded in `docs/plan/DECISIONS.md`.
-- No signing of assembled catalogs, no TTL or expiry of records, no CLI store commands, no infrastructure.
+- No signing of assembled catalogs, no infrastructure.
 
 ## Revision log
 
@@ -303,3 +314,6 @@ Closed by M21 (2026-11-17): `put_entry` refuses an entry whose identifier alread
 | 2026-11-17 | M21: §3 guarantee 6 now holds for both #multi-version-entries rules. `put_entry` refuses a new entry beside entries of the other version kind with `StoreError::VersionKindConflict { identifier }`, atomically: in-memory under its lock, sqlite and postgres in one transaction locking a `catalog_guards` row, DynamoDB in one `TransactWriteItems` with a `"g:"` guard item (`RecordKey::guard`, the entry-key hash construction over `[identifier]`) holding `versioned` and `entries`; `delete_entry` maintains the guard, so the last delete of a kind frees the identifier. New parity checks for both directions, same-kind puts, freeing, preconditions and racing writers; multi-version-entries-2 remaps to them. `assemble` keeps whole-document validation as defence in depth for stores written before the guard; the cold-start tests and `snapshot_refresh::cross_entry_error_keeps_the_last_good_snapshot_and_is_reported` take such records from a store that lists them, since 0.0.17 stores can still hold them, and the refresh test also asserts the put is refused. Writer IAM gains `UpdateItem`, `ConditionCheckItem` and `GetItem`. The open question is closed. Status stays Proposed: the postgres parity suite has not run against a live service. |
 | 2026-11-17 | `tests/postgres.rs` owns its environment like `tests/dynamodb.rs`: `TURUL_AI_CATALOG_POSTGRES_URL` when set, otherwise a temporary `initdb` cluster served by `pg_ctl` for the test binary, one database per test, stopped and deleted by the last drop guard; skips when no URL or binaries. The postgres parity suite now runs against a live server. |
 | 2026-11-17 | `import` now runs `validate` on the whole document first and refuses it (`ImportError::Invalid`, listing each error as `code at pointer`) before writing anything. Before this, two entries with one entry key collapsed silently into one record, and the assembled catalog passed with an entry missing. CI now runs the storage tests with the `sqlite` feature, which the acceptance clause requires. Pinned by `import::duplicate_entries_are_refused_and_nothing_is_written`. |
+| 2026-11-17 | ADR-017 R1: `put_entry` takes a `Provenance`; `get_entry` and `list_entries` return `StoredEntry`; an entry's `Etag` is `Etag::of_entry` and covers provenance; guarantee 8 (mode exclusion) in all four backends with provenance and mode stored beside the record bytes (SQL columns with a `CHECK`, DynamoDB attributes tested in the write condition); `import` takes a `WriterId`, writes curated and refuses another writer's or a lease's record. `parity::etag_is_the_digest_of_the_record_bytes` is replaced by `parity::etag_is_the_digest_of_entry_and_provenance` for entries. |
+| 2026-11-17 | ADR-017 R2: `assemble` takes `now`, leaves expired leases and entries failing the current gate out of the document and reports each in `Assembled::omitted` with its reason, and returns `next_expiry`; `SnapshotCache` takes a clock and refreshes at the earlier of `max_age` and `next_expiry`. The parity check `same_state_assembles_to_the_same_bytes` is renamed `same_state_and_now_assemble_to_the_same_bytes` and also covers a live and an expired lease. |
+| 2026-11-17 | Registration review: the trait section states that lifecycle and expiry are ADR-017's and that a missing or unknown stored mode is `CorruptProvenance` on every backend (the SQL backends returned `Backend` text); `StoreError` lists `ModeConflict`, `CorruptProvenance` and the new `Contended`; a put refuses a provenance whose bytes would not read back (an expiry past year 9999) with `CorruptProvenance` before touching the store; `import` is curated writes through `write_owned` with its refusals, and maps exhausted retries to `StoreError::Contended` (was `PreconditionFailed`); DynamoDB write loops are bounded at 8 attempts with jittered exponential backoff, then `Contended`, and the `dynamodb` feature adds `tokio` (`time`) for the timer; the renamed `assembly::cross_entry_error_still_fails_assembly` replaces `records_breaking_identifier_uniqueness_fail_assembly` in the requirement table; the F1 rows and the open question point at ADR-017; expiry and CLI store commands leave "What this ADR does not do". New: `parity::provenance_that_would_not_read_back_is_refused`, `parity::unknown_stored_mode_is_corrupt_provenance`, `dynamodb::conflicts_on_every_attempt_are_contended`, and a CI clippy step without default features. |

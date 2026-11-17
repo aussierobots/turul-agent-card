@@ -5,7 +5,11 @@
 mod assembly;
 mod ids;
 mod import;
+mod operator;
+mod owned;
+mod provenance;
 mod records;
+mod registration;
 mod store;
 
 #[cfg(feature = "dynamodb")]
@@ -17,11 +21,17 @@ mod postgres;
 #[cfg(feature = "sqlite")]
 mod sqlite;
 
-pub use assembly::{AssembleError, Assembled, assemble};
-pub use ids::{CatalogId, Etag, RecordKey};
+pub use assembly::{AssembleError, Assembled, Omission, OmissionReason, assemble};
+pub use ids::{CatalogId, Etag, RecordKey, WriterId};
 pub use import::{ImportError, import};
+pub use operator::{Expiry, Registration, RemoveError, list_registrations, remove_registration};
+pub use provenance::{ModeKind, Provenance, ProvenanceError};
 pub use records::{EntryRecord, HostRecord, RecordError};
-pub use store::{CatalogStore, Condition, StoreError, Stored};
+pub use registration::{
+    ModeRequest, PolicyError, PublisherVerifier, Registered, Registrar, RegistrationError,
+    RegistrationPolicy, VerifierRefusal, WriterGrant,
+};
+pub use store::{CatalogStore, Condition, StoreError, Stored, StoredEntry};
 
 #[cfg(feature = "in-memory")]
 pub use in_memory::InMemoryCatalogStore;

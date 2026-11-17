@@ -2,12 +2,14 @@
 
 #![allow(dead_code)]
 
+use std::time::SystemTime;
+
 use futures::executor::block_on;
 use lambda_http::http::Request as Builder;
 use lambda_http::{Body, Request, Response};
 use turul_ai_catalog::parse::parse;
 use turul_ai_catalog_lambda::ServedCatalog;
-use turul_ai_catalog_storage::{CatalogId, InMemoryCatalogStore, import};
+use turul_ai_catalog_storage::{CatalogId, InMemoryCatalogStore, WriterId, import};
 
 pub fn request(method: &str, uri: &str) -> Request {
     Builder::builder()
@@ -27,6 +29,10 @@ pub fn body_bytes(response: &Response<Body>) -> Vec<u8> {
     }
 }
 
+pub fn fixture_writer() -> WriterId {
+    WriterId::new("fixture").expect("valid writer id")
+}
+
 pub fn catalog_id() -> CatalogId {
     CatalogId::new("test").expect("valid catalog id")
 }
@@ -35,7 +41,7 @@ pub fn catalog_id() -> CatalogId {
 pub fn store_with(document: &str) -> InMemoryCatalogStore {
     let store = InMemoryCatalogStore::new();
     let parsed = parse(document.as_bytes()).expect("fixture parses");
-    block_on(import(&store, &catalog_id(), &parsed)).expect("fixture imports");
+    block_on(import(&store, &catalog_id(), &parsed, &fixture_writer())).expect("fixture imports");
     store
 }
 
@@ -44,6 +50,7 @@ pub fn served_from(document: &str) -> ServedCatalog {
     match block_on(ServedCatalog::assemble(
         &store_with(document),
         &catalog_id(),
+        SystemTime::now(),
     )) {
         Ok(s) => s,
         Err(e) => panic!("fixture must assemble: {e}"),

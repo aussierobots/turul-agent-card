@@ -1,17 +1,26 @@
+use std::collections::hash_map::RandomState;
+use std::hash::{BuildHasher, Hasher};
+use std::time::Duration;
+
 use async_trait::async_trait;
 use aws_sdk_dynamodb::Client;
 use aws_sdk_dynamodb::error::{DisplayErrorContext, ProvideErrorMetadata, SdkError};
+use aws_sdk_dynamodb::operation::put_item::PutItemError;
 use aws_sdk_dynamodb::operation::transact_write_items::TransactWriteItemsError;
 use aws_sdk_dynamodb::primitives::Blob;
 use aws_sdk_dynamodb::types::{
-    AttributeValue, ConditionCheck, Delete, Put, TransactWriteItem, Update,
+    AttributeValue, ConditionCheck, Delete, Put, ReturnValuesOnConditionCheckFailure,
+    TransactWriteItem, Update,
 };
 use turul_ai_catalog::identity::EntryKey;
 
 use crate::ids::{CatalogId, Etag, RecordKey};
+use crate::owned::ATTEMPTS;
+use crate::provenance::{ModeKind, Provenance, ProvenanceError};
 use crate::records::{EntryRecord, HostRecord};
 use crate::store::{
-    CatalogStore, Condition, StoreError, Stored, corrupt, key_error, kind_conflict,
+    CatalogStore, Condition, StoreError, Stored, StoredEntry, corrupt_provenance, entry_write,
+    key_error, kind_conflict, stored_entry,
 };
 
 const ITEM_LIMIT: &str = "record exceeds the DynamoDB item size limit of 400 KB";
@@ -22,6 +31,33 @@ const ENTRIES: &str = "entries";
 
 const CONDITION_FAILED: &str = "ConditionalCheckFailed";
 const TRANSACTION_CONFLICT: &str = "TransactionConflict";
+
+/// Entry item attributes: the provenance bytes (B) and the mode name (S), which a write condition
+/// can test.
+const PROVENANCE: &str = "provenance";
+const MODE: &str = "mode";
+
+/// The longest wait before the first retry; each later retry may wait twice as long.
+const BACKOFF_BASE: Duration = Duration::from_millis(20);
+
+/// Waits before retry `retry` (from 1) of a write that conflicted with another writer's
+/// transaction: a uniformly random delay below `BACKOFF_BASE × 2^(retry − 1)`, so writers that
+/// conflicted once spread their next attempts apart.
+async fn back_off(retry: usize) {
+    let cap = BACKOFF_BASE.saturating_mul(1 << (retry - 1).min(16));
+    let draw = RandomState::new().build_hasher().finish();
+    let nanos = u64::try_from(cap.as_nanos()).unwrap_or(u64::MAX).max(1);
+    tokio::time::sleep(Duration::from_nanos(draw % nanos)).await;
+}
+
+/// An entry item ready to write: its key, record, provenance bytes and mode, and its version.
+struct EntryItem<'a> {
+    key: &'a RecordKey,
+    record: &'a EntryRecord,
+    provenance: &'a [u8],
+    mode: ModeKind,
+    etag: &'a Etag,
+}
 
 /// Records in one DynamoDB table with partition key `pk` (S) and sort key `sk` (S). Beside each
 /// identifier's entry items sits a guard item (`sk` = `"g:…"`) holding its version kind and entry
@@ -81,6 +117,15 @@ fn s(value: &str) -> AttributeValue {
     AttributeValue::S(value.to_string())
 }
 
+fn optional_provenance(
+    item: &std::collections::HashMap<String, AttributeValue>,
+) -> Option<Vec<u8>> {
+    match item.get(PROVENANCE) {
+        Some(AttributeValue::B(blob)) => Some(blob.as_ref().to_vec()),
+        _ => None,
+    }
+}
+
 fn record_bytes(
     item: &std::collections::HashMap<String, AttributeValue>,
 ) -> Result<Vec<u8>, StoreError> {
@@ -89,6 +134,30 @@ fn record_bytes(
         _ => Err(StoreError::Backend(
             "item has no binary `record` attribute".to_string(),
         )),
+    }
+}
+
+/// Why a conditional replace failed, from the item the failed condition returned: no item or a
+/// version other than `expected` is `PreconditionFailed`, then another mode is `ModeConflict`.
+fn replace_refusal(
+    key: &RecordKey,
+    old: Option<&std::collections::HashMap<String, AttributeValue>>,
+    expected: Option<&Etag>,
+) -> StoreError {
+    let Some(old) = old.filter(|o| !o.is_empty()) else {
+        return StoreError::PreconditionFailed;
+    };
+    if let Some(e) = expected
+        && !matches!(old.get("etag"), Some(AttributeValue::S(stored)) if stored == e.as_str())
+    {
+        return StoreError::PreconditionFailed;
+    }
+    match old.get(MODE) {
+        Some(AttributeValue::S(name)) => match ModeKind::from_name(name) {
+            Some(stored) => StoreError::ModeConflict { stored },
+            None => corrupt_provenance(key, ProvenanceError::Mode),
+        },
+        _ => corrupt_provenance(key, ProvenanceError::Missing),
     }
 }
 
@@ -136,39 +205,54 @@ impl DynamoDbCatalogStore {
         }
     }
 
-    /// Replaces an existing entry item, with `expected` its required version. Fails
-    /// `PreconditionFailed` when the item is absent or its version differs.
+    /// Replaces an existing entry item of the same mode, with `expected` its required version.
+    /// Fails `PreconditionFailed` when the item is absent or its version differs, and
+    /// `ModeConflict` when it is in the other mode. An item inside another writer's transaction
+    /// is retried with backoff, up to [`ATTEMPTS`] attempts, then `Contended`.
     async fn replace(
         &self,
         catalog: &CatalogId,
-        key: &RecordKey,
-        bytes: &[u8],
+        item: &EntryItem<'_>,
         expected: Option<&Etag>,
     ) -> Result<Etag, StoreError> {
-        let etag = Etag::of(bytes);
-        loop {
+        for attempt in 0..ATTEMPTS {
+            if attempt > 0 {
+                back_off(attempt).await;
+            }
             let request = self
                 .client
                 .put_item()
                 .table_name(&self.table)
                 .item("pk", s(catalog.as_str()))
-                .item("sk", s(key.as_str()))
-                .item("record", AttributeValue::B(Blob::new(bytes)))
-                .item("etag", s(etag.as_str()));
+                .item("sk", s(item.key.as_str()))
+                .item("record", AttributeValue::B(Blob::new(item.record.bytes())))
+                .item(PROVENANCE, AttributeValue::B(Blob::new(item.provenance)))
+                .item(MODE, s(item.mode.as_str()))
+                .item("etag", s(item.etag.as_str()))
+                .expression_attribute_names("#m", MODE)
+                .expression_attribute_values(":m", s(item.mode.as_str()))
+                .return_values_on_condition_check_failure(
+                    ReturnValuesOnConditionCheckFailure::AllOld,
+                );
             let request = match expected {
-                None => request.condition_expression("attribute_exists(pk)"),
+                None => request.condition_expression("attribute_exists(pk) AND #m = :m"),
                 Some(e) => request
-                    .condition_expression("etag = :e")
+                    .condition_expression("etag = :e AND #m = :m")
                     .expression_attribute_values(":e", s(e.as_str())),
             };
             match request.send().await {
-                Ok(_) => return Ok(etag),
-                Err(e) if condition_failed(&e) => return Err(StoreError::PreconditionFailed),
-                // The item is inside another writer's transaction.
-                Err(e) if e.code() == Some("TransactionConflictException") => continue,
-                Err(e) => return Err(backend(e)),
+                Ok(_) => return Ok(item.etag.clone()),
+                Err(e) => match e.as_service_error() {
+                    Some(PutItemError::ConditionalCheckFailedException(failed)) => {
+                        return Err(replace_refusal(item.key, failed.item(), expected));
+                    }
+                    // The item is inside another writer's transaction.
+                    _ if e.code() == Some("TransactionConflictException") => {}
+                    _ => return Err(backend(e)),
+                },
             }
         }
+        Err(StoreError::Contended)
     }
 
     /// Runs one transaction; `Some` when DynamoDB cancelled it.
@@ -264,22 +348,36 @@ impl CatalogStore for DynamoDbCatalogStore {
         &self,
         catalog: &CatalogId,
         record: &EntryRecord,
+        provenance: &Provenance,
         condition: Condition,
     ) -> Result<Etag, StoreError> {
         let key = record.record_key().map_err(key_error)?;
+        let (provenance_bytes, etag) = entry_write(&key, record, provenance)?;
+        let item = EntryItem {
+            key: &key,
+            record,
+            provenance: &provenance_bytes,
+            mode: provenance.kind(),
+            etag: &etag,
+        };
         if let Condition::Matches(expected) = &condition {
-            return self
-                .replace(catalog, &key, record.bytes(), Some(expected))
-                .await;
+            return self.replace(catalog, &item, Some(expected)).await;
         }
         let guard = RecordKey::guard(&record.entry().identifier).map_err(key_error)?;
-        let etag = Etag::of(record.bytes());
-        loop {
+        for attempt in 0..ATTEMPTS {
+            if attempt > 0 {
+                back_off(attempt).await;
+            }
             let create = Put::builder()
                 .table_name(&self.table)
                 .item("pk", s(catalog.as_str()))
                 .item("sk", s(key.as_str()))
                 .item("record", AttributeValue::B(Blob::new(record.bytes())))
+                .item(
+                    PROVENANCE,
+                    AttributeValue::B(Blob::new(provenance_bytes.as_slice())),
+                )
+                .item(MODE, s(item.mode.as_str()))
                 .item("etag", s(etag.as_str()))
                 .condition_expression("attribute_not_exists(pk)")
                 .build()
@@ -313,7 +411,7 @@ impl CatalogStore for DynamoDbCatalogStore {
                 }
                 // `Any` on an existing entry is a replace, which leaves the kinds unchanged; an
                 // entry deleted meanwhile is created on the next attempt.
-                match self.replace(catalog, &key, record.bytes(), None).await {
+                match self.replace(catalog, &item, None).await {
                     Err(StoreError::PreconditionFailed) => continue,
                     done => return done,
                 }
@@ -325,19 +423,34 @@ impl CatalogStore for DynamoDbCatalogStore {
                 return Err(cancelled.into_error());
             }
         }
+        Err(StoreError::Contended)
     }
 
     async fn get_entry(
         &self,
         catalog: &CatalogId,
         key: &EntryKey,
-    ) -> Result<Option<Stored<EntryRecord>>, StoreError> {
+    ) -> Result<Option<StoredEntry>, StoreError> {
         let record_key = RecordKey::entry(key).map_err(key_error)?;
-        let Some((bytes, etag)) = self.get(catalog, &record_key).await? else {
-            return Ok(None);
-        };
-        let record = EntryRecord::from_stored(bytes).map_err(|e| corrupt(&record_key, e))?;
-        Ok(Some(Stored { record, etag }))
+        let out = self
+            .client
+            .get_item()
+            .table_name(&self.table)
+            .key("pk", s(catalog.as_str()))
+            .key("sk", s(record_key.as_str()))
+            .consistent_read(true)
+            .send()
+            .await
+            .map_err(backend)?;
+        out.item()
+            .map(|item| {
+                stored_entry(
+                    &record_key,
+                    record_bytes(item)?,
+                    optional_provenance(item).as_deref(),
+                )
+            })
+            .transpose()
     }
 
     async fn delete_entry(
@@ -348,7 +461,10 @@ impl CatalogStore for DynamoDbCatalogStore {
     ) -> Result<(), StoreError> {
         let record_key = RecordKey::entry(key).map_err(key_error)?;
         let guard = RecordKey::guard(key.identifier()).map_err(key_error)?;
-        loop {
+        for attempt in 0..ATTEMPTS {
+            if attempt > 0 {
+                back_off(attempt).await;
+            }
             let remove = Delete::builder()
                 .table_name(&self.table)
                 .key("pk", s(catalog.as_str()))
@@ -424,12 +540,10 @@ impl CatalogStore for DynamoDbCatalogStore {
                 return Err(cancelled.into_error());
             }
         }
+        Err(StoreError::Contended)
     }
 
-    async fn list_entries(
-        &self,
-        catalog: &CatalogId,
-    ) -> Result<Vec<Stored<EntryRecord>>, StoreError> {
+    async fn list_entries(&self, catalog: &CatalogId) -> Result<Vec<StoredEntry>, StoreError> {
         let mut listed = Vec::new();
         let mut start = None;
         loop {
@@ -451,10 +565,11 @@ impl CatalogStore for DynamoDbCatalogStore {
                     Some(AttributeValue::S(name)) => name.clone(),
                     _ => String::new(),
                 };
-                let etag = Etag::of(&bytes);
-                let record = EntryRecord::from_stored(bytes)
-                    .map_err(|e| corrupt(&RecordKey::from_stored_name(name), e))?;
-                listed.push(Stored { record, etag });
+                listed.push(stored_entry(
+                    &RecordKey::from_stored_name(name),
+                    bytes,
+                    optional_provenance(item).as_deref(),
+                )?);
             }
             start = out.last_evaluated_key().map(ToOwned::to_owned);
             if start.is_none() {
@@ -480,7 +595,8 @@ impl CatalogStore for DynamoDbCatalogStore {
         let Some((bytes, etag)) = self.get(catalog, &RecordKey::HOST).await? else {
             return Ok(None);
         };
-        let record = HostRecord::from_stored(bytes).map_err(|e| corrupt(&RecordKey::HOST, e))?;
+        let record = HostRecord::from_stored(bytes)
+            .map_err(|e| crate::store::corrupt(&RecordKey::HOST, e))?;
         Ok(Some(Stored { record, etag }))
     }
 }

@@ -3,8 +3,10 @@
 mod support;
 
 use async_trait::async_trait;
+use std::time::SystemTime;
+
 use futures::executor::block_on;
-use support::{body_bytes, catalog_id, request, served_from};
+use support::{body_bytes, catalog_id, fixture_writer, request, served_from};
 use turul_ai_catalog::identity::{EntryKey, WELL_KNOWN_PATH};
 use turul_ai_catalog::parse::parse;
 use turul_ai_catalog::validate::{Conformance, Severity, validate};
@@ -13,7 +15,7 @@ use turul_ai_catalog_lambda::{
 };
 use turul_ai_catalog_storage::{
     AssembleError, CatalogId, CatalogStore, Condition, EntryRecord, Etag, HostRecord, ImportError,
-    InMemoryCatalogStore, StoreError, Stored, import,
+    InMemoryCatalogStore, Provenance, StoreError, Stored, StoredEntry, import,
 };
 
 const SPEC_EXAMPLE: &str = include_str!("fixtures/ai-catalog.json");
@@ -51,6 +53,7 @@ impl CatalogStore for Unreachable {
         &self,
         _: &CatalogId,
         _: &EntryRecord,
+        _: &Provenance,
         _: Condition,
     ) -> Result<Etag, StoreError> {
         Err(StoreError::Backend("unreachable".into()))
@@ -59,7 +62,7 @@ impl CatalogStore for Unreachable {
         &self,
         _: &CatalogId,
         _: &EntryKey,
-    ) -> Result<Option<Stored<EntryRecord>>, StoreError> {
+    ) -> Result<Option<StoredEntry>, StoreError> {
         Err(StoreError::Backend("unreachable".into()))
     }
     async fn delete_entry(
@@ -70,7 +73,7 @@ impl CatalogStore for Unreachable {
     ) -> Result<(), StoreError> {
         Err(StoreError::Backend("unreachable".into()))
     }
-    async fn list_entries(&self, _: &CatalogId) -> Result<Vec<Stored<EntryRecord>>, StoreError> {
+    async fn list_entries(&self, _: &CatalogId) -> Result<Vec<StoredEntry>, StoreError> {
         Err(StoreError::Backend("unreachable".into()))
     }
     async fn put_host(
@@ -113,6 +116,7 @@ impl CatalogStore for WrittenBeforeTheGuard {
         &self,
         _: &CatalogId,
         _: &EntryRecord,
+        _: &Provenance,
         _: Condition,
     ) -> Result<Etag, StoreError> {
         unreachable!()
@@ -121,7 +125,7 @@ impl CatalogStore for WrittenBeforeTheGuard {
         &self,
         _: &CatalogId,
         _: &EntryKey,
-    ) -> Result<Option<Stored<EntryRecord>>, StoreError> {
+    ) -> Result<Option<StoredEntry>, StoreError> {
         unreachable!()
     }
     async fn delete_entry(
@@ -132,13 +136,19 @@ impl CatalogStore for WrittenBeforeTheGuard {
     ) -> Result<(), StoreError> {
         unreachable!()
     }
-    async fn list_entries(&self, _: &CatalogId) -> Result<Vec<Stored<EntryRecord>>, StoreError> {
+    async fn list_entries(&self, _: &CatalogId) -> Result<Vec<StoredEntry>, StoreError> {
         Ok(self
             .0
             .iter()
-            .map(|r| Stored {
-                record: r.clone(),
-                etag: Etag::of(r.bytes()),
+            .map(|r| {
+                let provenance = Provenance::Curated {
+                    writer: fixture_writer(),
+                };
+                StoredEntry {
+                    record: r.clone(),
+                    etag: Etag::of_entry(r, &provenance).unwrap(),
+                    provenance,
+                }
             })
             .collect())
     }
@@ -161,6 +171,7 @@ fn empty_store_serves_a_valid_empty_catalog() {
     let served = block_on(ServedCatalog::assemble(
         &InMemoryCatalogStore::new(),
         &catalog_id(),
+        SystemTime::now(),
     ))
     .expect("empty store assembles");
     let r = handle(&served, &request("GET", WELL_KNOWN_PATH));
@@ -174,6 +185,7 @@ fn invalid_store_fails_cold_start() {
     match block_on(ServedCatalog::assemble(
         &written_before_the_guard(),
         &catalog_id(),
+        SystemTime::now(),
     )) {
         Err(ColdStartError::Assemble(AssembleError::Invalid(report))) => {
             assert!(report.has_errors())
@@ -181,7 +193,11 @@ fn invalid_store_fails_cold_start() {
         Err(e) => panic!("wrong error: {e}"),
         Ok(_) => panic!("an error diagnostic must fail cold start"),
     }
-    match block_on(ServedCatalog::assemble(&Unreachable, &catalog_id())) {
+    match block_on(ServedCatalog::assemble(
+        &Unreachable,
+        &catalog_id(),
+        SystemTime::now(),
+    )) {
         Err(ColdStartError::Assemble(AssembleError::Store(StoreError::Backend(_)))) => {}
         Err(e) => panic!("wrong error: {e}"),
         Ok(_) => panic!("an unreachable store must fail cold start"),
@@ -191,7 +207,11 @@ fn invalid_store_fails_cold_start() {
 #[test]
 fn cold_start_error_names_each_error_code_and_pointer() {
     let store = written_before_the_guard();
-    let Err(err) = block_on(ServedCatalog::assemble(&store, &catalog_id())) else {
+    let Err(err) = block_on(ServedCatalog::assemble(
+        &store,
+        &catalog_id(),
+        SystemTime::now(),
+    )) else {
         panic!("must fail cold start");
     };
     let ColdStartError::Assemble(AssembleError::Invalid(report)) = &err else {
@@ -318,7 +338,7 @@ fn non_i_json_numbers_are_refused_before_they_can_be_served() {
     .expect("parses");
     let store = InMemoryCatalogStore::new();
     assert!(matches!(
-        block_on(import(&store, &catalog_id(), &document)),
+        block_on(import(&store, &catalog_id(), &document, &fixture_writer())),
         Err(ImportError::Record(_))
     ));
 }

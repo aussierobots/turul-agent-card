@@ -1,6 +1,6 @@
 [package]
 name = "turul-ai-catalog-cli"
-description = "Command line for AI Catalog: validate, list, view, init, add and remove"
+description = "Command line for AI Catalog: validate, list, view, init, add, remove and store"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -19,8 +19,17 @@ name = "turul-ai-catalog"
 path = "src/main.rs"
 doc = false
 
+[features]
+# Backends for `store`; SQLite is always built.
+postgres = ["turul-ai-catalog-storage/postgres"]
+dynamodb = ["dep:aws-config", "dep:aws-sdk-dynamodb", "turul-ai-catalog-storage/dynamodb"]
+
 [dependencies]
 turul-ai-catalog = { workspace = true }
+turul-ai-catalog-storage = { workspace = true, features = ["sqlite"] }
 turul-ai-catalog-client = { workspace = true }
 turul-ai-catalog-tui = { workspace = true }
 clap = { workspace = true }
+tokio = { workspace = true }
+aws-config = { workspace = true, optional = true }
+aws-sdk-dynamodb = { workspace = true, optional = true }

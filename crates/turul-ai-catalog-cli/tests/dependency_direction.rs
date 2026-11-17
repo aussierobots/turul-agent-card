@@ -94,6 +94,26 @@ fn optional(package: &str) -> BTreeSet<String> {
         .collect()
 }
 
+/// Whether a package's normal dependency `dep` keeps its default features, and the features it
+/// enables.
+fn declared(package: &str, dep: &str) -> (bool, BTreeSet<String>) {
+    let meta = metadata();
+    let pkg = array(get(&meta, "packages"))
+        .iter()
+        .find(|p| string(get(p, "name")) == package)
+        .unwrap_or_else(|| panic!("package {package} is not a workspace member"));
+    let d = array(get(pkg, "dependencies"))
+        .iter()
+        .find(|d| string(get(d, "name")) == dep && matches!(get(d, "kind"), Json::Null))
+        .unwrap_or_else(|| panic!("{package} has no normal dependency {dep}"));
+    let defaults = matches!(get(d, "uses_default_features"), Json::Bool(true));
+    let features = array(get(d, "features"))
+        .iter()
+        .map(|f| string(f).to_string())
+        .collect();
+    (defaults, features)
+}
+
 fn set(names: &[&str]) -> BTreeSet<String> {
     names.iter().map(|s| s.to_string()).collect()
 }
@@ -165,7 +185,9 @@ fn tui_dependencies_are_exactly_the_allowed_set() {
     assert!(dev.is_empty(), "{dev:?}");
 }
 
-// the CLI depends on the format crate, the client, the TUI and `clap` only.
+// the CLI depends on the format crate, the client, the TUI, the storage crate (listing and
+// removal live there), `clap` and `tokio` (a current-thread runtime to call it). `aws-config` and
+// `aws-sdk-dynamodb` exist only for the DynamoDB backend (feature `dynamodb`).
 #[test]
 fn cli_dependencies_are_exactly_the_allowed_set() {
     let (normal, dev) = dependencies("turul-ai-catalog-cli");
@@ -175,8 +197,16 @@ fn cli_dependencies_are_exactly_the_allowed_set() {
             "turul-ai-catalog",
             "turul-ai-catalog-client",
             "turul-ai-catalog-tui",
-            "clap"
+            "turul-ai-catalog-storage",
+            "clap",
+            "tokio",
+            "aws-config",
+            "aws-sdk-dynamodb"
         ])
+    );
+    assert_eq!(
+        optional("turul-ai-catalog-cli"),
+        set(&["aws-config", "aws-sdk-dynamodb"])
     );
     assert!(dev.is_empty(), "{dev:?}");
 }
@@ -216,16 +246,48 @@ fn lambda_dependencies_are_exactly_the_allowed_set() {
 }
 
 // the storage crate's default features add no runtime or network dependency, never the client or
-// trust crate, and the format crate keeps zero dependencies.
+// trust crate, and the format crate keeps zero dependencies. `tokio` is optional: the `dynamodb`
+// backend sleeps between retries with its timer.
 #[test]
 fn storage_default_features_add_no_runtime_or_network_dependency() {
     let (normal, _) = dependencies("turul-ai-catalog-storage");
     let optional = optional("turul-ai-catalog-storage");
-    assert_eq!(optional, set(&["sqlx", "aws-sdk-dynamodb"]));
+    assert_eq!(optional, set(&["sqlx", "aws-sdk-dynamodb", "tokio"]));
     let always: std::collections::BTreeSet<_> = normal.difference(&optional).cloned().collect();
     assert_eq!(always, set(&["turul-ai-catalog", "async-trait", "sha2"]));
     let (core, _) = dependencies("turul-ai-catalog");
     assert!(core.is_empty(), "{core:?}");
+}
+
+// the trust crate's `registration` feature adds exactly storage (without its default features,
+// so without a backend), `async-trait` and `tokio` with `rt` only; with it off the crate keeps
+// its default dependency set.
+#[test]
+fn trust_registration_feature_adds_only_storage_async_trait_and_tokio() {
+    let (normal, _) = dependencies("turul-ai-catalog-trust");
+    let optional = optional("turul-ai-catalog-trust");
+    assert_eq!(
+        optional,
+        set(&["turul-ai-catalog-storage", "async-trait", "tokio"])
+    );
+    let always: BTreeSet<_> = normal.difference(&optional).cloned().collect();
+    assert_eq!(
+        always,
+        set(&[
+            "turul-ai-catalog",
+            "turul-ai-catalog-client",
+            "sha2",
+            "turul-jwt-validator"
+        ])
+    );
+    assert_eq!(
+        declared("turul-ai-catalog-trust", "turul-ai-catalog-storage"),
+        (false, set(&[]))
+    );
+    assert_eq!(
+        declared("turul-ai-catalog-trust", "tokio"),
+        (false, set(&["rt"]))
+    );
 }
 
 // #embedded-content-safety: nothing in a front end or the lambda touches the network, the file

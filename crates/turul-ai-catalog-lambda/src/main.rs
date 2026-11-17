@@ -1,6 +1,7 @@
 //! The Lambda function: serves the catalog assembled from the configured store.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 
 use lambda_http::{Error, run, service_fn};
 use turul_ai_catalog_lambda::{
@@ -32,14 +33,33 @@ async fn backend() -> Result<(Arc<dyn CatalogStore>, turul_ai_catalog_storage::C
     ))
 }
 
+fn report_omissions(served: &ServedCatalog) {
+    for omission in served.omitted() {
+        eprintln!("{omission}");
+    }
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Error> {
     let max_age = max_age(var(MAX_AGE_VAR).as_deref())?;
     let (store, catalog) = backend().await?;
-    let cache = SnapshotCache::new(ServedCatalog::assemble(&*store, &catalog).await?, max_age);
+    let first = ServedCatalog::assemble(&*store, &catalog, SystemTime::now()).await?;
+    report_omissions(&first);
+    let cache = SnapshotCache::new(first, max_age, SystemTime::now);
     let (store, catalog, cache) = (&store, &catalog, &cache);
+    let reported: Mutex<Option<Arc<ServedCatalog>>> = Mutex::new(None);
+    let reported = &reported;
     run(service_fn(move |request| async move {
         let (served, refresh_error) = cache.current(&**store, catalog).await;
+        // One line per omission per assembly: a snapshot is reported once, when it first appears.
+        let mut last = reported.lock().unwrap_or_else(|p| p.into_inner());
+        if last.as_ref().is_none_or(|l| !Arc::ptr_eq(l, &served)) {
+            if last.is_some() {
+                report_omissions(&served);
+            }
+            *last = Some(Arc::clone(&served));
+        }
+        drop(last);
         if let Some(e) = refresh_error {
             eprintln!(
                 "catalog refresh failed, serving the last good snapshot: {}",

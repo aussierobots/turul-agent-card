@@ -3,15 +3,17 @@
 
 use std::fmt;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, SystemTime};
 
 use lambda_http::http::{Method, StatusCode, header};
 use lambda_http::{Body, Request, Response};
 use turul_ai_catalog::identity::{MEDIA_TYPE, WELL_KNOWN_PATH};
 use turul_ai_catalog::model::AiCatalog;
+use turul_ai_catalog::timestamp::Timestamp;
 use turul_ai_catalog::validate::Severity;
 use turul_ai_catalog_storage::{
-    AssembleError, CatalogId, CatalogStore, ImportError, InMemoryCatalogStore, assemble, import,
+    AssembleError, CatalogId, CatalogStore, ImportError, InMemoryCatalogStore, Omission, WriterId,
+    assemble, import,
 };
 
 /// Value of the `Allow` header on a 405 response (RFC 9110 section 15.5.6).
@@ -23,6 +25,9 @@ pub const ID_VAR: &str = "TURUL_AI_CATALOG_ID";
 pub const TABLE_VAR: &str = "TURUL_AI_CATALOG_TABLE";
 /// Environment variable holding the snapshot refresh interval in seconds.
 pub const MAX_AGE_VAR: &str = "TURUL_AI_CATALOG_MAX_AGE_SECS";
+
+/// The writer of the curated records of [`ServedCatalog::from_document`]'s private store.
+const DOCUMENT_WRITER: &str = "from-document";
 
 const DEFAULT_MAX_AGE: Duration = Duration::from_secs(60);
 
@@ -130,14 +135,26 @@ pub fn max_age(raw: Option<&str>) -> Result<Duration, ColdStartError> {
 }
 
 /// Canonical bytes of an assembled catalog that passed [`validate`](turul_ai_catalog::validate::validate)
-/// with no error diagnostic.
+/// with no error diagnostic, with what that assembly left out.
 #[derive(Debug)]
 pub struct ServedCatalog {
     bytes: Vec<u8>,
+    omitted: Vec<Omission>,
+    next_expiry: Option<Timestamp>,
 }
 
 impl ServedCatalog {
-    /// Assembles the catalog from the store with [`assemble`].
+    /// Every entry record the assembly left out of the served bytes, with its reason.
+    pub fn omitted(&self) -> &[Omission] {
+        &self.omitted
+    }
+
+    /// The earliest expiry among the leases in the served bytes.
+    pub fn next_expiry(&self) -> Option<Timestamp> {
+        self.next_expiry
+    }
+
+    /// Assembles the catalog from the store with [`assemble`] at `now`.
     ///
     /// # Errors
     ///
@@ -153,7 +170,7 @@ impl ServedCatalog {
     /// # futures::executor::block_on(async {
     /// let store = InMemoryCatalogStore::new();
     /// let catalog = CatalogId::new("default")?;
-    /// let served = ServedCatalog::assemble(&store, &catalog).await?;
+    /// let served = ServedCatalog::assemble(&store, &catalog, std::time::SystemTime::now()).await?;
     /// # let _ = served;
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// # })?;
@@ -162,10 +179,13 @@ impl ServedCatalog {
     pub async fn assemble(
         store: &dyn CatalogStore,
         catalog: &CatalogId,
+        now: SystemTime,
     ) -> Result<Self, ColdStartError> {
-        let assembled = assemble(store, catalog).await?;
+        let assembled = assemble(store, catalog, now).await?;
         Ok(Self {
             bytes: assembled.bytes,
+            omitted: assembled.omitted,
+            next_expiry: assembled.next_expiry,
         })
     }
 
@@ -198,61 +218,103 @@ impl ServedCatalog {
         // A fixed, valid id: the store is private to this call, so the id is never observed.
         let catalog =
             CatalogId::new("default").map_err(|_| ColdStartError::Config("invalid catalog id"))?;
-        import(&store, &catalog, document)
+        let writer = WriterId::new(DOCUMENT_WRITER)
+            .map_err(|_| ColdStartError::Config("invalid writer id"))?;
+        import(&store, &catalog, document, &writer)
             .await
             .map_err(ColdStartError::Import)?;
-        Self::assemble(&store, &catalog).await
+        Self::assemble(&store, &catalog, SystemTime::now()).await
     }
 }
 
-/// The last good [`ServedCatalog`] and when it was assembled. The clock lives here, never in
-/// [`handle`].
+/// The last good [`ServedCatalog`], when it was last assembled or attempted, and the clock that
+/// decides when it is due. The clock lives here, never in [`handle`].
 pub struct SnapshotCache {
     max_age: Duration,
-    state: Mutex<(Arc<ServedCatalog>, Instant)>,
+    clock: Box<dyn Fn() -> SystemTime + Send + Sync>,
+    state: Mutex<Snapshot>,
+}
+
+struct Snapshot {
+    served: Arc<ServedCatalog>,
+    attempted_at: SystemTime,
+    failed: bool,
 }
 
 impl SnapshotCache {
-    /// Creates a cache holding `served`, assembled now, that refreshes once it is `max_age` old.
-    pub fn new(served: ServedCatalog, max_age: Duration) -> Self {
+    /// Creates a cache holding `served`, assembled at `clock()`. The clock is the one `now` passed
+    /// to every re-assembly; production passes [`SystemTime::now`].
+    pub fn new(
+        served: ServedCatalog,
+        max_age: Duration,
+        clock: impl Fn() -> SystemTime + Send + Sync + 'static,
+    ) -> Self {
+        let attempted_at = clock();
         Self {
             max_age,
-            state: Mutex::new((Arc::new(served), Instant::now())),
+            clock: Box::new(clock),
+            state: Mutex::new(Snapshot {
+                served: Arc::new(served),
+                attempted_at,
+                failed: false,
+            }),
         }
     }
 
-    /// Returns the snapshot to serve, re-assembled when its age is at least `max_age`.
+    /// Returns the snapshot to serve, re-assembled when it is at least `max_age` old or the clock
+    /// has reached its [`next_expiry`](ServedCatalog::next_expiry), so an expired lease is not
+    /// served past its expiry.
     ///
-    /// When re-assembly fails the last good snapshot is kept and the failure is returned beside
-    /// it so the caller can report it; the next attempt waits another `max_age`.
+    /// When re-assembly fails the last good snapshot is kept, which can hold a lease past its
+    /// expiry, and the failure is returned beside it so the caller can report it; the next
+    /// attempt waits another `max_age`.
     pub async fn current(
         &self,
         store: &dyn CatalogStore,
         catalog: &CatalogId,
     ) -> (Arc<ServedCatalog>, Option<ColdStartError>) {
-        let (served, assembled_at) = self.read();
-        if assembled_at.elapsed() < self.max_age {
+        let now = (self.clock)();
+        let (served, due) = self.read(now);
+        if !due {
             return (served, None);
         }
-        match ServedCatalog::assemble(store, catalog).await {
+        match ServedCatalog::assemble(store, catalog, now).await {
             Ok(fresh) => {
                 let fresh = Arc::new(fresh);
-                *self.state.lock().unwrap_or_else(|p| p.into_inner()) =
-                    (Arc::clone(&fresh), Instant::now());
+                *self.lock() = Snapshot {
+                    served: Arc::clone(&fresh),
+                    attempted_at: now,
+                    failed: false,
+                };
                 (fresh, None)
             }
             Err(e) => {
-                // Keep the last good snapshot but restart its age, so a lasting failure is retried
-                // and reported once per `max_age`, not on every request.
-                self.state.lock().unwrap_or_else(|p| p.into_inner()).1 = Instant::now();
+                // Keep the last good snapshot and restart its age, so a lasting failure is
+                // retried and reported once per `max_age`, not on every request.
+                let mut state = self.lock();
+                state.attempted_at = now;
+                state.failed = true;
                 (served, Some(e))
             }
         }
     }
 
-    fn read(&self) -> (Arc<ServedCatalog>, Instant) {
-        let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
-        (Arc::clone(&state.0), state.1)
+    fn lock(&self) -> std::sync::MutexGuard<'_, Snapshot> {
+        self.state.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    fn read(&self, now: SystemTime) -> (Arc<ServedCatalog>, bool) {
+        let state = self.lock();
+        let aged = state
+            .attempted_at
+            .checked_add(self.max_age)
+            .is_some_and(|due| now >= due);
+        let expired = !state.failed
+            && state
+                .served
+                .next_expiry
+                .is_some_and(|e| Timestamp::from_system_time(now) >= e);
+        (Arc::clone(&state.served), aged || expired)
     }
 }
 
@@ -275,7 +337,7 @@ fn empty(status: StatusCode) -> lambda_http::http::response::Builder {
 ///
 /// # futures::executor::block_on(async {
 /// let store = InMemoryCatalogStore::new();
-/// let served = ServedCatalog::assemble(&store, &CatalogId::new("default")?).await?;
+/// let served = ServedCatalog::assemble(&store, &CatalogId::new("default")?, std::time::SystemTime::now()).await?;
 ///
 /// let found = Request::builder().uri("/.well-known/ai-catalog.json").body(Body::Empty)?;
 /// assert_eq!(handle(&served, &found).status(), 200);

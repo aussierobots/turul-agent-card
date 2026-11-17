@@ -5,6 +5,7 @@ use turul_ai_catalog::identity::{EntryIdentifier, EntryKey};
 use turul_ai_catalog::parse::ParseError;
 
 use crate::ids::{CatalogId, Etag, RecordKey};
+use crate::provenance::{ModeKind, Provenance, ProvenanceError};
 use crate::records::{EntryRecord, HostRecord};
 
 /// The precondition of a write, checked atomically with the write.
@@ -27,6 +28,17 @@ pub struct Stored<R> {
     pub etag: Etag,
 }
 
+/// An entry record, who wrote it, and its version.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StoredEntry {
+    /// The record as read from the backend.
+    pub record: EntryRecord,
+    /// The mode and writer the record was stored with.
+    pub provenance: Provenance,
+    /// The version of the entry, [`Etag::of_entry`] of the record and its provenance.
+    pub etag: Etag,
+}
+
 /// Why a [`CatalogStore`] operation failed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -42,6 +54,18 @@ pub enum StoreError {
         /// The identifier whose stored entries have the other version kind.
         identifier: EntryIdentifier,
     },
+    /// A put would replace a record stored in the other mode.
+    ModeConflict {
+        /// The mode of the stored record.
+        stored: ModeKind,
+    },
+    /// An entry record whose provenance is missing or does not parse.
+    CorruptProvenance {
+        /// The key of the record whose provenance failed to read.
+        key: RecordKey,
+        /// The failure.
+        error: ProvenanceError,
+    },
     /// A stored record that does not parse.
     Corrupt {
         /// The key of the record that failed to parse.
@@ -49,6 +73,8 @@ pub enum StoreError {
         /// The parse failure.
         error: ParseError,
     },
+    /// Concurrent writers conflicted with the write on every attempt.
+    Contended,
     /// The backend's own error, as text.
     Backend(String),
 }
@@ -63,7 +89,14 @@ impl fmt::Display for StoreError {
                 "{} already has stored entries of the other version kind",
                 identifier.as_str()
             ),
+            Self::ModeConflict { stored } => {
+                write!(f, "the stored record is in {stored} mode")
+            }
+            Self::CorruptProvenance { key, error } => {
+                write!(f, "corrupt provenance of record {key}: {error}")
+            }
             Self::Corrupt { key, error } => write!(f, "corrupt record {key}: {error}"),
+            Self::Contended => f.write_str("concurrent writers conflicted on every attempt"),
             Self::Backend(m) => write!(f, "backend error: {m}"),
         }
     }
@@ -74,43 +107,52 @@ impl std::error::Error for StoreError {}
 /// Entry-level catalog records with [`Etag`] versions.
 ///
 /// Every backend guarantees: atomic conditional
-/// writes; read-your-writes; reads return exactly the bytes written (`etag == Etag::of(bytes)`);
+/// writes; read-your-writes; reads return exactly the bytes written (a host's `etag == Etag::of(bytes)`);
 /// `list_entries` returns every committed entry record once, in no defined order; no operation
 /// touches another [`CatalogId`]; at most one entry record per [`RecordKey`]; no identifier with
-/// both unversioned and versioned entry records. `list_entries` and `get_host` are not one
-/// snapshot.
+/// both unversioned and versioned entry records; no entry record replaced by a put of the other
+/// [`ModeKind`]. An entry's version is [`Etag::of_entry`], so it covers the provenance.
+/// `list_entries` and `get_host` are not one snapshot.
 #[async_trait]
 pub trait CatalogStore: Send + Sync {
     /// Returns the backend's short name, such as `"in-memory"`.
     fn backend_name(&self) -> &'static str;
 
-    /// Writes an entry record under `condition` and returns its new version.
+    /// Writes an entry record with its provenance under `condition` and returns its new version.
     ///
-    /// The condition check, the version-kind check and the write are one atomic step.
+    /// The condition check, the mode check, the version-kind check and the write are one atomic
+    /// step, checked in that order. A provenance whose bytes would not read back is refused
+    /// before the store is touched.
     ///
     /// # Errors
     ///
-    /// [`StoreError::PreconditionFailed`] when `condition` does not hold;
+    /// [`StoreError::CorruptProvenance`] when `provenance` would not read back, or the stored
+    /// record's mode is missing or unknown; [`StoreError::PreconditionFailed`] when `condition`
+    /// does not hold;
+    /// [`StoreError::ModeConflict`] when the put would replace a record of the other mode;
     /// [`StoreError::VersionKindConflict`] when the record is new and its identifier already has
-    /// entries of the other version kind; [`StoreError::Backend`] on a backend failure.
+    /// entries of the other version kind; [`StoreError::Contended`] when concurrent transactions
+    /// conflicted on every attempt; [`StoreError::Backend`] on a backend failure.
     async fn put_entry(
         &self,
         catalog: &CatalogId,
         record: &EntryRecord,
+        provenance: &Provenance,
         condition: Condition,
     ) -> Result<Etag, StoreError>;
 
-    /// Returns the entry record stored under `key` and its version, or `None` when absent.
+    /// Returns the entry stored under `key`, or `None` when absent.
     ///
     /// # Errors
     ///
-    /// [`StoreError::Corrupt`] when the stored bytes do not parse; [`StoreError::Backend`] on a
-    /// backend failure.
+    /// [`StoreError::Corrupt`] when the stored bytes do not parse;
+    /// [`StoreError::CorruptProvenance`] when the provenance is missing or does not parse;
+    /// [`StoreError::Backend`] on a backend failure.
     async fn get_entry(
         &self,
         catalog: &CatalogId,
         key: &EntryKey,
-    ) -> Result<Option<Stored<EntryRecord>>, StoreError>;
+    ) -> Result<Option<StoredEntry>, StoreError>;
 
     /// Deletes the entry record stored under `key`.
     ///
@@ -126,16 +168,14 @@ pub trait CatalogStore: Send + Sync {
         expected: Option<&Etag>,
     ) -> Result<(), StoreError>;
 
-    /// Returns every entry record of `catalog`, in no defined order.
+    /// Returns every entry of `catalog`, in no defined order.
     ///
     /// # Errors
     ///
-    /// [`StoreError::Corrupt`] when a stored record does not parse; [`StoreError::Backend`] on a
-    /// backend failure.
-    async fn list_entries(
-        &self,
-        catalog: &CatalogId,
-    ) -> Result<Vec<Stored<EntryRecord>>, StoreError>;
+    /// [`StoreError::Corrupt`] when a stored record does not parse;
+    /// [`StoreError::CorruptProvenance`] when a stored provenance is missing or does not parse;
+    /// [`StoreError::Backend`] on a backend failure.
+    async fn list_entries(&self, catalog: &CatalogId) -> Result<Vec<StoredEntry>, StoreError>;
 
     /// Writes the Host Info record of `catalog` under `condition` and returns its new version.
     ///
@@ -160,19 +200,86 @@ pub trait CatalogStore: Send + Sync {
     -> Result<Option<Stored<HostRecord>>, StoreError>;
 }
 
-pub(crate) fn key_error(e: crate::RecordError) -> StoreError {
-    StoreError::Backend(e.to_string())
-}
+/// What every backend shares: error builders, the read-back of an entry and the write-side
+/// check of a provenance.
+#[cfg(any(
+    feature = "in-memory",
+    feature = "sqlite",
+    feature = "postgres",
+    feature = "dynamodb"
+))]
+mod backend {
+    use super::*;
 
-pub(crate) fn kind_conflict(record: &EntryRecord) -> StoreError {
-    StoreError::VersionKindConflict {
-        identifier: record.entry().identifier.clone(),
+    pub(crate) fn key_error(e: crate::RecordError) -> StoreError {
+        StoreError::Backend(e.to_string())
+    }
+
+    pub(crate) fn kind_conflict(record: &EntryRecord) -> StoreError {
+        StoreError::VersionKindConflict {
+            identifier: record.entry().identifier.clone(),
+        }
+    }
+
+    pub(crate) fn corrupt_provenance(key: &RecordKey, error: ProvenanceError) -> StoreError {
+        StoreError::CorruptProvenance {
+            key: key.clone(),
+            error,
+        }
+    }
+
+    /// Builds the entry read back from a backend: the record parsed, then the provenance, with the
+    /// version computed from what was read.
+    pub(crate) fn stored_entry(
+        key: &RecordKey,
+        record_bytes: Vec<u8>,
+        provenance_bytes: Option<&[u8]>,
+    ) -> Result<StoredEntry, StoreError> {
+        let record = EntryRecord::from_stored(record_bytes).map_err(|e| corrupt(key, e))?;
+        let provenance = Provenance::parse(
+            provenance_bytes
+                .ok_or(ProvenanceError::Missing)
+                .map_err(|e| corrupt_provenance(key, e))?,
+        )
+        .map_err(|e| corrupt_provenance(key, e))?;
+        let etag = Etag::of_entry(&record, &provenance).map_err(|e| corrupt_provenance(key, e))?;
+        Ok(StoredEntry {
+            record,
+            provenance,
+            etag,
+        })
+    }
+
+    pub(crate) fn corrupt(
+        key: &RecordKey,
+        error: turul_ai_catalog::parse::ParseError,
+    ) -> StoreError {
+        StoreError::Corrupt {
+            key: key.clone(),
+            error,
+        }
+    }
+
+    /// The provenance bytes and the entry version a put stores under `key`. A provenance whose bytes
+    /// would not read back is [`StoreError::CorruptProvenance`], so no backend stores a record its own
+    /// reads would refuse.
+    pub(crate) fn entry_write(
+        key: &RecordKey,
+        record: &EntryRecord,
+        provenance: &Provenance,
+    ) -> Result<(Vec<u8>, Etag), StoreError> {
+        let bytes = provenance
+            .to_bytes()
+            .map_err(|e| corrupt_provenance(key, e))?;
+        let etag = Etag::of_entry(record, provenance).map_err(|e| corrupt_provenance(key, e))?;
+        Ok((bytes, etag))
     }
 }
 
-pub(crate) fn corrupt(key: &RecordKey, error: turul_ai_catalog::parse::ParseError) -> StoreError {
-    StoreError::Corrupt {
-        key: key.clone(),
-        error,
-    }
-}
+#[cfg(any(
+    feature = "in-memory",
+    feature = "sqlite",
+    feature = "postgres",
+    feature = "dynamodb"
+))]
+pub(crate) use backend::*;

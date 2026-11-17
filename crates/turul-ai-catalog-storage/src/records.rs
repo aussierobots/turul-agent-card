@@ -3,7 +3,6 @@ use std::fmt;
 use turul_ai_catalog::canonical::CanonicalError;
 use turul_ai_catalog::identity::EntryKey;
 use turul_ai_catalog::model::{AiCatalog, CatalogEntry, HostInfo};
-use turul_ai_catalog::parse::{ParseError, parse_entry, parse_host};
 use turul_ai_catalog::validate::{Report, validate};
 
 use crate::ids::RecordKey;
@@ -18,6 +17,8 @@ pub enum RecordError {
     NotIJson(CanonicalError),
     /// A catalog id is not 1 to 128 bytes of `[A-Za-z0-9._-]`.
     InvalidCatalogId,
+    /// A writer id is not 1 to 128 bytes of `[A-Za-z0-9._-]`.
+    InvalidWriterId,
 }
 
 impl fmt::Display for RecordError {
@@ -27,6 +28,9 @@ impl fmt::Display for RecordError {
             Self::NotIJson(e) => write!(f, "{e}"),
             Self::InvalidCatalogId => {
                 f.write_str("catalog id must be 1 to 128 bytes of [A-Za-z0-9._-]")
+            }
+            Self::InvalidWriterId => {
+                f.write_str("writer id must be 1 to 128 bytes of [A-Za-z0-9._-]")
             }
         }
     }
@@ -86,8 +90,14 @@ impl EntryRecord {
 
     /// A record read back from a backend: parsed with the format crate's entry reader, bytes kept
     /// as stored.
-    pub(crate) fn from_stored(bytes: Vec<u8>) -> Result<Self, ParseError> {
-        let entry = parse_entry(&bytes)?;
+    #[cfg(any(
+        feature = "in-memory",
+        feature = "sqlite",
+        feature = "postgres",
+        feature = "dynamodb"
+    ))]
+    pub(crate) fn from_stored(bytes: Vec<u8>) -> Result<Self, turul_ai_catalog::parse::ParseError> {
+        let entry = turul_ai_catalog::parse::parse_entry(&bytes)?;
         Ok(Self { entry, bytes })
     }
 
@@ -157,8 +167,14 @@ impl HostRecord {
         Ok(Self { host, bytes })
     }
 
-    pub(crate) fn from_stored(bytes: Vec<u8>) -> Result<Self, ParseError> {
-        let host = parse_host(&bytes)?;
+    #[cfg(any(
+        feature = "in-memory",
+        feature = "sqlite",
+        feature = "postgres",
+        feature = "dynamodb"
+    ))]
+    pub(crate) fn from_stored(bytes: Vec<u8>) -> Result<Self, turul_ai_catalog::parse::ParseError> {
+        let host = turul_ai_catalog::parse::parse_host(&bytes)?;
         Ok(Self { host, bytes })
     }
 

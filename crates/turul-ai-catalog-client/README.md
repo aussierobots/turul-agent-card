@@ -37,7 +37,7 @@ produce(&file, &Change::Init { host: Some(host) })?;
 let mut server = EntryInput::new(
     "urn:air:example.com:mcp:weather".into(),
     "application/mcp-server-card+json".into(),
-    Content::Url("https://mcp.example.com/.well-known/mcp/server-card.json".into()),
+    Content::Url("https://mcp.example.com/mcp/server-card".into()),
 );
 server.display_name = Some("Weather".into());
 produce(&file, &Change::Add(server))?;
@@ -54,7 +54,7 @@ use turul_ai_catalog_client::{FetchPolicy, Source, load};
 # let dir = std::env::temp_dir().join(format!("ai-catalog-readme-load-{}", std::process::id()));
 # std::fs::create_dir_all(&dir)?;
 # let file = dir.join("ai-catalog.json");
-# std::fs::write(&file, br#"{"specVersion":"1.0","entries":[{"identifier":"urn:air:example.com:mcp:weather","type":"application/mcp-server-card+json","url":"https://mcp.example.com/.well-known/mcp/server-card.json"}]}"#)?;
+# std::fs::write(&file, br#"{"specVersion":"1.0","entries":[{"identifier":"urn:air:example.com:mcp:weather","type":"application/mcp-server-card+json","url":"https://mcp.example.com/mcp/server-card"}]}"#)?;
 let tree = load(&Source::File(file), &FetchPolicy::default())?;
 for row in &tree.rows {
     println!("{}", row.name);

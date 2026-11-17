@@ -260,7 +260,11 @@ fn outcome<'a>(
     }
 }
 
-fn entry_report<'a>(
+/// Returns one entry's outcomes from already resolved DID documents, as [`verify_resolved`]
+/// decides them for each entry of a tree. A signer absent from `docs` gives [`Reason::Resolve`].
+/// Fetches no DID documents; artifact retrieval follows `policy.fetch`, and a relative `url`
+/// resolves against `base`.
+pub fn verify_entry_resolved<'a>(
     entry: &'a CatalogEntry,
     base: Option<&str>,
     docs: &DidDocuments,
@@ -328,7 +332,7 @@ fn catalog_reports<'a>(
             .document
             .entries
             .iter()
-            .map(|e| entry_report(e, node.base.as_deref(), docs, policy, now))
+            .map(|e| verify_entry_resolved(e, node.base.as_deref(), docs, policy, now))
             .collect(),
     });
     for nested in &node.children {
@@ -351,6 +355,16 @@ pub fn verify_resolved<'a>(
     let mut catalogs = Vec::new();
     catalog_reports(tree, docs, policy, now, &mut catalogs);
     TrustReport { catalogs }
+}
+
+fn entry_signers(entry: &CatalogEntry, policy: &TrustPolicy, out: &mut Vec<DidWebRoot>) {
+    for m in entry.trust_manifests.iter().flatten() {
+        if let Ok((signer, _)) = precheck(SignedObject::Manifest(m), policy)
+            && !out.contains(&signer)
+        {
+            out.push(signer);
+        }
+    }
 }
 
 fn collect_signers(node: &ResolvedCatalog, policy: &TrustPolicy, out: &mut Vec<DidWebRoot>) {
@@ -393,4 +407,26 @@ pub fn verify<'a>(
         })
         .collect();
     verify_resolved(tree, &docs, policy, now)
+}
+
+/// Fetches the DID document of each distinct prechecked signer of `entry`'s manifests once, then
+/// runs [`verify_entry_resolved`].
+///
+/// Blocking: call through `tokio::task::spawn_blocking` from async code.
+pub fn verify_entry<'a>(
+    entry: &'a CatalogEntry,
+    base: Option<&str>,
+    policy: &TrustPolicy,
+    now: SystemTime,
+) -> EntryReport<'a> {
+    let mut signers = Vec::new();
+    entry_signers(entry, policy, &mut signers);
+    let docs: DidDocuments = signers
+        .into_iter()
+        .map(|s| {
+            let doc = resolve(&s, &policy.fetch);
+            (s, doc)
+        })
+        .collect();
+    verify_entry_resolved(entry, base, &docs, policy, now)
 }

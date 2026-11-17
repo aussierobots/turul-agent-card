@@ -1,5 +1,7 @@
 #![doc = include_str!("../README.md")]
 
+mod store;
+
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -92,6 +94,9 @@ enum Command {
         #[arg(long)]
         version: Option<String>,
     },
+    /// List or remove the entries of a catalog held in a store.
+    #[command(subcommand)]
+    Store(store::StoreCommand),
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -170,6 +175,7 @@ fn main() -> ExitCode {
 /// Runs one command and returns its exit code.
 fn run(command: Command) -> u8 {
     match command {
+        Command::Store(command) => store::run(command),
         Command::Validate { format, source } => {
             read_only(source, format, None, |tree, label, out| {
                 validate_text(tree, label, out)

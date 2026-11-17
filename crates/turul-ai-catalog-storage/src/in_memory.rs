@@ -5,16 +5,26 @@ use async_trait::async_trait;
 use turul_ai_catalog::identity::EntryKey;
 
 use crate::ids::{CatalogId, Etag, RecordKey};
+use crate::provenance::{ModeKind, Provenance};
 use crate::records::{EntryRecord, HostRecord};
 use crate::store::{
-    CatalogStore, Condition, StoreError, Stored, corrupt, key_error, kind_conflict,
+    CatalogStore, Condition, StoreError, Stored, StoredEntry, corrupt, entry_write, key_error,
+    kind_conflict, stored_entry,
 };
+
+/// One stored record: its bytes and version, and for an entry its provenance bytes and mode.
+#[derive(Clone)]
+struct Slot {
+    bytes: Vec<u8>,
+    etag: Etag,
+    provenance: Option<(Vec<u8>, ModeKind)>,
+}
 
 /// Records, and per guard key the identifier's version kind (`true` for versioned) and its number
 /// of entry records. A guard exists while its identifier has at least one entry record.
 #[derive(Default)]
 struct Records {
-    records: BTreeMap<(CatalogId, RecordKey), (Vec<u8>, Etag)>,
+    records: BTreeMap<(CatalogId, RecordKey), Slot>,
     guards: BTreeMap<(CatalogId, RecordKey), (bool, usize)>,
 }
 
@@ -64,34 +74,39 @@ impl InMemoryCatalogStore {
         condition: Condition,
     ) -> Result<Etag, StoreError> {
         let mut map = self.records.write().map_err(poisoned)?;
-        Self::put_locked(&mut map, (catalog.clone(), key), bytes, condition)
+        let slot = (catalog.clone(), key);
+        let etag = Etag::of(bytes);
+        Self::check_condition(&map, &slot, &condition)?;
+        map.records.insert(
+            slot,
+            Slot {
+                bytes: bytes.to_vec(),
+                etag: etag.clone(),
+                provenance: None,
+            },
+        );
+        Ok(etag)
     }
 
-    fn put_locked(
-        map: &mut Records,
-        slot: (CatalogId, RecordKey),
-        bytes: &[u8],
-        condition: Condition,
-    ) -> Result<Etag, StoreError> {
-        let current = map.records.get(&slot).map(|(_, etag)| etag);
-        let allowed = match &condition {
+    fn check_condition(
+        map: &Records,
+        slot: &(CatalogId, RecordKey),
+        condition: &Condition,
+    ) -> Result<(), StoreError> {
+        let current = map.records.get(slot).map(|s| &s.etag);
+        let allowed = match condition {
             Condition::Any => true,
             Condition::Absent => current.is_none(),
             Condition::Matches(e) => current == Some(e),
         };
-        if !allowed {
-            return Err(StoreError::PreconditionFailed);
+        if allowed {
+            Ok(())
+        } else {
+            Err(StoreError::PreconditionFailed)
         }
-        let etag = Etag::of(bytes);
-        map.records.insert(slot, (bytes.to_vec(), etag.clone()));
-        Ok(etag)
     }
 
-    fn get(
-        &self,
-        catalog: &CatalogId,
-        key: RecordKey,
-    ) -> Result<Option<(Vec<u8>, Etag)>, StoreError> {
+    fn get(&self, catalog: &CatalogId, key: RecordKey) -> Result<Option<Slot>, StoreError> {
         let map = self.records.read().map_err(poisoned)?;
         Ok(map.records.get(&(catalog.clone(), key)).cloned())
     }
@@ -107,23 +122,36 @@ impl CatalogStore for InMemoryCatalogStore {
         &self,
         catalog: &CatalogId,
         record: &EntryRecord,
+        provenance: &Provenance,
         condition: Condition,
     ) -> Result<Etag, StoreError> {
-        let slot = (catalog.clone(), record.record_key().map_err(key_error)?);
+        let key = record.record_key().map_err(key_error)?;
+        let (provenance_bytes, etag) = entry_write(&key, record, provenance)?;
+        let slot = (catalog.clone(), key);
         let guard = (
             catalog.clone(),
             RecordKey::guard(&record.entry().identifier).map_err(key_error)?,
         );
         let versioned = record.entry().version.is_some();
         let mut map = self.records.write().map_err(poisoned)?;
+        Self::check_condition(&map, &slot, &condition)?;
         let created = !map.records.contains_key(&slot);
-        if created
-            && !matches!(condition, Condition::Matches(_))
-            && map.guards.get(&guard).is_some_and(|(v, _)| *v != versioned)
+        if let Some(stored) = map.records.get(&slot).and_then(|s| s.provenance.as_ref())
+            && stored.1 != provenance.kind()
         {
+            return Err(StoreError::ModeConflict { stored: stored.1 });
+        }
+        if created && map.guards.get(&guard).is_some_and(|(v, _)| *v != versioned) {
             return Err(kind_conflict(record));
         }
-        let etag = Self::put_locked(&mut map, slot, record.bytes(), condition)?;
+        map.records.insert(
+            slot,
+            Slot {
+                bytes: record.bytes().to_vec(),
+                etag: etag.clone(),
+                provenance: Some((provenance_bytes, provenance.kind())),
+            },
+        );
         if created {
             map.guards.entry(guard).or_insert((versioned, 0)).1 += 1;
         }
@@ -134,13 +162,17 @@ impl CatalogStore for InMemoryCatalogStore {
         &self,
         catalog: &CatalogId,
         key: &EntryKey,
-    ) -> Result<Option<Stored<EntryRecord>>, StoreError> {
+    ) -> Result<Option<StoredEntry>, StoreError> {
         let record_key = RecordKey::entry(key).map_err(key_error)?;
-        let Some((bytes, etag)) = self.get(catalog, record_key.clone())? else {
+        let Some(slot) = self.get(catalog, record_key.clone())? else {
             return Ok(None);
         };
-        let record = EntryRecord::from_stored(bytes).map_err(|e| corrupt(&record_key, e))?;
-        Ok(Some(Stored { record, etag }))
+        stored_entry(
+            &record_key,
+            slot.bytes,
+            slot.provenance.as_ref().map(|p| p.0.as_slice()),
+        )
+        .map(Some)
     }
 
     async fn delete_entry(
@@ -158,7 +190,7 @@ impl CatalogStore for InMemoryCatalogStore {
         match (map.records.get(&slot), expected) {
             (None, None) => Err(StoreError::NotFound),
             (None, Some(_)) => Err(StoreError::PreconditionFailed),
-            (Some((_, current)), Some(e)) if current != e => Err(StoreError::PreconditionFailed),
+            (Some(slot), Some(e)) if slot.etag != *e => Err(StoreError::PreconditionFailed),
             _ => {
                 map.records.remove(&slot);
                 if let Some((_, count)) = map.guards.get_mut(&guard) {
@@ -172,20 +204,17 @@ impl CatalogStore for InMemoryCatalogStore {
         }
     }
 
-    async fn list_entries(
-        &self,
-        catalog: &CatalogId,
-    ) -> Result<Vec<Stored<EntryRecord>>, StoreError> {
+    async fn list_entries(&self, catalog: &CatalogId) -> Result<Vec<StoredEntry>, StoreError> {
         let map = self.records.read().map_err(poisoned)?;
         map.records
             .iter()
             .filter(|((c, k), _)| c == catalog && k.is_entry())
-            .map(|((_, k), (bytes, etag))| {
-                let record = EntryRecord::from_stored(bytes.clone()).map_err(|e| corrupt(k, e))?;
-                Ok(Stored {
-                    record,
-                    etag: etag.clone(),
-                })
+            .map(|((_, k), slot)| {
+                stored_entry(
+                    k,
+                    slot.bytes.clone(),
+                    slot.provenance.as_ref().map(|p| p.0.as_slice()),
+                )
             })
             .collect()
     }
@@ -203,10 +232,14 @@ impl CatalogStore for InMemoryCatalogStore {
         &self,
         catalog: &CatalogId,
     ) -> Result<Option<Stored<HostRecord>>, StoreError> {
-        let Some((bytes, etag)) = self.get(catalog, RecordKey::HOST)? else {
+        let Some(slot) = self.get(catalog, RecordKey::HOST)? else {
             return Ok(None);
         };
-        let record = HostRecord::from_stored(bytes).map_err(|e| corrupt(&RecordKey::HOST, e))?;
-        Ok(Some(Stored { record, etag }))
+        let record =
+            HostRecord::from_stored(slot.bytes).map_err(|e| corrupt(&RecordKey::HOST, e))?;
+        Ok(Some(Stored {
+            record,
+            etag: slot.etag,
+        }))
     }
 }

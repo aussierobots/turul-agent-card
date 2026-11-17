@@ -236,14 +236,40 @@ parity_checks!(
     delete_of_a_missing_record_is_not_found,
     writes_are_visible_to_the_next_read,
     list_returns_every_entry,
-    same_state_assembles_to_the_same_bytes,
-    etag_is_the_digest_of_the_record_bytes,
+    same_state_and_now_assemble_to_the_same_bytes,
+    expired_lease_keeps_its_version_kind,
+    provenance_reads_back_exactly,
+    provenance_that_would_not_read_back_is_refused,
+    etag_is_the_digest_of_entry_and_provenance,
+    lease_and_curated_puts_refuse_each_other,
+    matches_condition_refuses_a_stale_lease_etag,
     recreated_identical_record_has_the_same_etag,
     unversioned_entry_beside_versioned_ones_is_refused,
     versioned_entry_beside_an_unversioned_one_is_refused,
     same_version_kind_puts_are_accepted,
     deleting_the_last_record_of_a_kind_frees_the_identifier,
     conditional_puts_keep_their_preconditions,
+);
+
+/// Checks that need a store they can share, such as with a `Registrar`.
+macro_rules! shared_parity_checks {
+    ($($name:ident),* $(,)?) => {
+        $(
+            #[tokio::test]
+            #[ignore = "needs PostgreSQL"]
+            async fn $name() {
+                let Some(env) = Env::start(stringify!($name)).await else { return };
+                parity::$name(Arc::new(env.store().await)).await;
+            }
+        )*
+    };
+}
+
+shared_parity_checks!(
+    registered_identifier_reads_back_exactly,
+    another_writer_cannot_take_over_an_entry,
+    unregister_by_another_writer_is_refused,
+    unregister_frees_the_identifier,
 );
 
 #[tokio::test]
@@ -268,9 +294,97 @@ async fn racing_version_kinds_leave_one_kind() {
 
 #[tokio::test]
 #[ignore = "needs PostgreSQL"]
+async fn racing_cross_mode_puts_leave_one_mode() {
+    let Some(env) = Env::start("racing_cross_mode_puts_leave_one_mode").await else {
+        return;
+    };
+    let shared: Arc<dyn CatalogStore> = Arc::new(env.store().await);
+    parity::racing_cross_mode_puts_leave_one_mode(shared).await;
+}
+
+#[tokio::test]
+#[ignore = "needs PostgreSQL"]
+async fn concurrent_lease_refreshes_on_one_etag_have_one_winner() {
+    let Some(env) = Env::start("concurrent_lease_refreshes_on_one_etag_have_one_winner").await
+    else {
+        return;
+    };
+    let shared: Arc<dyn CatalogStore> = Arc::new(env.store().await);
+    parity::concurrent_lease_refreshes_on_one_etag_have_one_winner(shared).await;
+}
+
+#[tokio::test]
+#[ignore = "needs PostgreSQL"]
+async fn many_instances_refreshing_one_lease_all_succeed() {
+    let Some(env) = Env::start("many_instances_refreshing_one_lease_all_succeed").await else {
+        return;
+    };
+    let shared: Arc<dyn CatalogStore> = Arc::new(env.store().await);
+    parity::many_instances_refreshing_one_lease_all_succeed(shared).await;
+}
+
+#[tokio::test]
+#[ignore = "needs PostgreSQL"]
 async fn backend_is_named() {
     let Some(env) = Env::start("backend_is_named").await else {
         return;
     };
     assert_eq!(env.store().await.backend_name(), "postgres");
+}
+
+/// A table created by an earlier release has no provenance columns, so connecting fails and names
+/// the column instead of reading its records as curated.
+#[tokio::test]
+#[ignore = "needs PostgreSQL"]
+async fn table_from_an_earlier_release_fails_connect() {
+    let Some(env) = Env::start("table_from_an_earlier_release_fails_connect").await else {
+        return;
+    };
+    let pool = sqlx::PgPool::connect(&env.url).await.unwrap();
+    sqlx::query(
+        "CREATE TABLE catalog_records (catalog_id TEXT NOT NULL, record_key TEXT NOT NULL, \
+         record BYTEA NOT NULL, etag TEXT NOT NULL, PRIMARY KEY (catalog_id, record_key))",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    pool.close().await;
+    let Err(turul_ai_catalog_storage::StoreError::Backend(message)) =
+        PostgresCatalogStore::connect(&env.url).await
+    else {
+        panic!("connect must refuse a table without provenance columns");
+    };
+    assert!(message.contains("provenance"), "{message}");
+}
+
+/// A row whose mode is neither `lease` nor `curated`, written with the `CHECK` dropped.
+#[tokio::test]
+#[ignore = "needs PostgreSQL"]
+async fn unknown_stored_mode_is_corrupt_provenance() {
+    let Some(env) = Env::start("unknown_stored_mode_is_corrupt_provenance").await else {
+        return;
+    };
+    let store = env.store().await;
+    let c = common::catalog("unknown-mode");
+    let r = common::record("urn:air:a", None);
+    let etag = turul_ai_catalog_storage::Etag::of_entry(&r, &common::curated()).unwrap();
+    let pool = sqlx::PgPool::connect(&env.url).await.unwrap();
+    sqlx::query("ALTER TABLE catalog_records DROP CONSTRAINT catalog_records_check")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO catalog_records (catalog_id, record_key, record, etag, provenance, mode) \
+         VALUES ($1, $2, $3, $4, $5, 'other')",
+    )
+    .bind(c.as_str())
+    .bind(r.record_key().unwrap().as_str())
+    .bind(r.bytes())
+    .bind(etag.as_str())
+    .bind(common::curated().to_bytes().unwrap())
+    .execute(&pool)
+    .await
+    .unwrap();
+    pool.close().await;
+    parity::unknown_stored_mode_is_corrupt_provenance(&store, &c, &r, &etag).await;
 }

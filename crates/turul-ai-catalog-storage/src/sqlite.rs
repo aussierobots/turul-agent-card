@@ -6,9 +6,11 @@ use sqlx::{Row, Sqlite, SqlitePool, Transaction};
 use turul_ai_catalog::identity::EntryKey;
 
 use crate::ids::{CatalogId, Etag, RecordKey};
+use crate::provenance::{ModeKind, Provenance, ProvenanceError};
 use crate::records::{EntryRecord, HostRecord};
 use crate::store::{
-    CatalogStore, Condition, StoreError, Stored, corrupt, key_error, kind_conflict,
+    CatalogStore, Condition, StoreError, Stored, StoredEntry, corrupt, corrupt_provenance,
+    entry_write, key_error, kind_conflict, stored_entry,
 };
 
 const MEMORY: &str = ":memory:";
@@ -55,11 +57,25 @@ impl SqliteCatalogStore {
             "CREATE TABLE IF NOT EXISTS catalog_records (\
              catalog_id TEXT NOT NULL, record_key TEXT NOT NULL, \
              record BLOB NOT NULL, etag TEXT NOT NULL, \
-             PRIMARY KEY (catalog_id, record_key))",
+             provenance BLOB, mode TEXT, \
+             PRIMARY KEY (catalog_id, record_key), \
+             CHECK ((record_key = 'h' AND provenance IS NULL AND mode IS NULL) \
+             OR (record_key <> 'h' AND provenance IS NOT NULL AND mode IN ('lease', 'curated'))))",
         )
         .execute(&pool)
         .await
         .map_err(backend)?;
+        // A table created by an earlier release lacks the columns; it is refused, not read as
+        // curated.
+        sqlx::query("SELECT provenance, mode FROM catalog_records LIMIT 0")
+            .execute(&pool)
+            .await
+            .map_err(|e| {
+                StoreError::Backend(format!(
+                    "catalog_records was created by an earlier release and has no provenance \
+                     columns: {e}"
+                ))
+            })?;
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS catalog_guards (\
              catalog_id TEXT NOT NULL, guard_key TEXT NOT NULL, \
@@ -194,6 +210,12 @@ fn read_row(row: &sqlx::sqlite::SqliteRow) -> Result<(Vec<u8>, Etag), StoreError
     Ok((bytes, etag))
 }
 
+fn read_entry(key: &RecordKey, row: &sqlx::sqlite::SqliteRow) -> Result<StoredEntry, StoreError> {
+    let bytes: Vec<u8> = row.try_get("record").map_err(backend)?;
+    let provenance: Vec<u8> = row.try_get("provenance").map_err(backend)?;
+    stored_entry(key, bytes, Some(&provenance))
+}
+
 #[async_trait]
 impl CatalogStore for SqliteCatalogStore {
     fn backend_name(&self) -> &'static str {
@@ -204,65 +226,75 @@ impl CatalogStore for SqliteCatalogStore {
         &self,
         catalog: &CatalogId,
         record: &EntryRecord,
+        provenance: &Provenance,
         condition: Condition,
     ) -> Result<Etag, StoreError> {
         let key = record.record_key().map_err(key_error)?;
         let guard = RecordKey::guard(&record.entry().identifier).map_err(key_error)?;
         let versioned = record.entry().version.is_some();
-        let etag = Etag::of(record.bytes());
+        let (provenance_bytes, etag) = entry_write(&key, record, provenance)?;
+        let mode = provenance.kind();
         let mut tx = self
             .pool
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(backend)?;
         let (guard_versioned, entries) = lock_guard(&mut tx, catalog, &guard, versioned).await?;
-        let exists =
-            sqlx::query("SELECT 1 FROM catalog_records WHERE catalog_id = ?1 AND record_key = ?2")
-                .bind(catalog.as_str())
-                .bind(key.as_str())
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(backend)?
-                .is_some();
-        let created = match (&condition, exists) {
-            (Condition::Absent, true) | (Condition::Matches(_), false) => {
+        let stored = sqlx::query(
+            "SELECT etag, mode FROM catalog_records WHERE catalog_id = ?1 AND record_key = ?2",
+        )
+        .bind(catalog.as_str())
+        .bind(key.as_str())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(backend)?;
+        let created = match (&condition, stored) {
+            (Condition::Absent, Some(_)) | (Condition::Matches(_), None) => {
                 return Err(StoreError::PreconditionFailed);
             }
-            (_, true) => {
-                let expected = match &condition {
-                    Condition::Matches(e) => Some(e.as_str()),
-                    _ => None,
-                };
-                let done = sqlx::query(
-                    "UPDATE catalog_records SET record = ?3, etag = ?4 \
-                     WHERE catalog_id = ?1 AND record_key = ?2 \
-                     AND (?5 IS NULL OR etag = ?5)",
+            (_, Some(row)) => {
+                if let Condition::Matches(e) = &condition {
+                    let stored_etag: String = row.try_get("etag").map_err(backend)?;
+                    if stored_etag != e.as_str() {
+                        return Err(StoreError::PreconditionFailed);
+                    }
+                }
+                let stored_mode: Option<String> = row.try_get("mode").map_err(backend)?;
+                match stored_mode.as_deref().map(ModeKind::from_name) {
+                    Some(Some(stored)) if stored == mode => {}
+                    Some(Some(stored)) => return Err(StoreError::ModeConflict { stored }),
+                    Some(None) => return Err(corrupt_provenance(&key, ProvenanceError::Mode)),
+                    None => return Err(corrupt_provenance(&key, ProvenanceError::Missing)),
+                }
+                sqlx::query(
+                    "UPDATE catalog_records SET record = ?3, etag = ?4, provenance = ?5 \
+                     WHERE catalog_id = ?1 AND record_key = ?2",
                 )
                 .bind(catalog.as_str())
                 .bind(key.as_str())
                 .bind(record.bytes())
                 .bind(etag.as_str())
-                .bind(expected)
+                .bind(provenance_bytes.as_slice())
                 .execute(&mut *tx)
                 .await
                 .map_err(backend)?;
-                if done.rows_affected() != 1 {
-                    return Err(StoreError::PreconditionFailed);
-                }
                 0
             }
-            (_, false) => {
+            (_, None) => {
                 if entries > 0 && guard_versioned != versioned {
                     return Err(kind_conflict(record));
                 }
                 sqlx::query(
-                    "INSERT INTO catalog_records (catalog_id, record_key, record, etag) \
-                     VALUES (?1, ?2, ?3, ?4)",
+                    "INSERT INTO catalog_records \
+                     (catalog_id, record_key, record, etag, provenance, mode) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 )
                 .bind(catalog.as_str())
                 .bind(key.as_str())
                 .bind(record.bytes())
                 .bind(etag.as_str())
+                .bind(provenance_bytes.as_slice())
+                .bind(mode.as_str())
                 .execute(&mut *tx)
                 .await
                 .map_err(backend)?;
@@ -279,13 +311,18 @@ impl CatalogStore for SqliteCatalogStore {
         &self,
         catalog: &CatalogId,
         key: &EntryKey,
-    ) -> Result<Option<Stored<EntryRecord>>, StoreError> {
+    ) -> Result<Option<StoredEntry>, StoreError> {
         let record_key = RecordKey::entry(key).map_err(key_error)?;
-        let Some((bytes, etag)) = self.get(catalog, &record_key).await? else {
-            return Ok(None);
-        };
-        let record = EntryRecord::from_stored(bytes).map_err(|e| corrupt(&record_key, e))?;
-        Ok(Some(Stored { record, etag }))
+        let row = sqlx::query(
+            "SELECT record, provenance FROM catalog_records \
+             WHERE catalog_id = ?1 AND record_key = ?2",
+        )
+        .bind(catalog.as_str())
+        .bind(record_key.as_str())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(backend)?;
+        row.map(|row| read_entry(&record_key, &row)).transpose()
     }
 
     async fn delete_entry(
@@ -325,12 +362,9 @@ impl CatalogStore for SqliteCatalogStore {
         Ok(())
     }
 
-    async fn list_entries(
-        &self,
-        catalog: &CatalogId,
-    ) -> Result<Vec<Stored<EntryRecord>>, StoreError> {
+    async fn list_entries(&self, catalog: &CatalogId) -> Result<Vec<StoredEntry>, StoreError> {
         let rows = sqlx::query(
-            "SELECT record_key, record, etag FROM catalog_records \
+            "SELECT record_key, record, provenance FROM catalog_records \
              WHERE catalog_id = ?1 AND substr(record_key, 1, 2) = ?2",
         )
         .bind(catalog.as_str())
@@ -340,11 +374,8 @@ impl CatalogStore for SqliteCatalogStore {
         .map_err(backend)?;
         rows.iter()
             .map(|row| {
-                let (bytes, etag) = read_row(row)?;
                 let name: String = row.try_get("record_key").map_err(backend)?;
-                let record = EntryRecord::from_stored(bytes)
-                    .map_err(|e| corrupt(&RecordKey::from_stored_name(name), e))?;
-                Ok(Stored { record, etag })
+                read_entry(&RecordKey::from_stored_name(name), row)
             })
             .collect()
     }

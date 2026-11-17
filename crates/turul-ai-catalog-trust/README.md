@@ -90,12 +90,16 @@ For a whole resolved tree, `verify` fetches each signer's DID document once and 
 | `did_web` | DID document retrieval, acceptance and verification-key selection. |
 | `accept` | Acceptance of one signature under a `TrustPolicy`. |
 | `digest` | Artifact digests and integrity checks. |
-| `report` | Entry coverage, publisher authority, endorsement and the trust report. |
+| `report` | Entry coverage, publisher authority, endorsement, the trust report and `verify_entry`. |
+| `registration` | Feature `registration`: the publisher verifier for runtime registration. |
 | `identity` | `did:web` root and `urn:air` identifier shapes. |
 
 ## Feature flags
 
-None.
+- `registration` (off by default): `DidWebPublisherVerifier`, the `PublisherVerifier` of
+  [`turul-ai-catalog-storage`](../turul-ai-catalog-storage). It accepts an entry only when its
+  `urn:air` publisher signed a trust manifest that covers it. Adds `turul-ai-catalog-storage`
+  (without default features, so without a backend), `async-trait` and `tokio` (`rt`).
 
 ## Licence
 

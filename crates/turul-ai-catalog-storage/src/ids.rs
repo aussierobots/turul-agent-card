@@ -5,7 +5,8 @@ use sha2::{Digest, Sha256};
 use turul_ai_catalog::identity::{EntryIdentifier, EntryKey};
 use turul_ai_catalog::json::Json;
 
-use crate::records::RecordError;
+use crate::provenance::{Provenance, ProvenanceError};
+use crate::records::{EntryRecord, RecordError};
 
 fn hex(bytes: &[u8]) -> String {
     use fmt::Write;
@@ -13,6 +14,15 @@ fn hex(bytes: &[u8]) -> String {
         let _ = write!(s, "{b:02x}");
         s
     })
+}
+
+/// Whether `id` is 1 to 128 bytes of `[A-Za-z0-9._-]`, the grammar of [`CatalogId`] and
+/// [`WriterId`].
+fn is_id_text(id: &str) -> bool {
+    (1..=128).contains(&id.len())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
 /// A storage namespace naming one catalog document: 1 to 128 bytes of `[A-Za-z0-9._-]`.
@@ -37,11 +47,7 @@ impl CatalogId {
     /// ```
     pub fn new(id: impl Into<String>) -> Result<Self, RecordError> {
         let id = id.into();
-        let ok = (1..=128).contains(&id.len())
-            && id
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
-        if ok {
+        if is_id_text(&id) {
             Ok(Self(id))
         } else {
             Err(RecordError::InvalidCatalogId)
@@ -55,6 +61,49 @@ impl CatalogId {
 }
 
 impl fmt::Display for CatalogId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// The opaque, operator-assigned identity of whoever writes an entry: 1 to 128 bytes of
+/// `[A-Za-z0-9._-]`, compared exactly. The library trusts nothing about it beyond what the
+/// deployer authenticated, and never derives one from an address or an entry member.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct WriterId(String);
+
+impl WriterId {
+    /// Builds a writer id from `id`.
+    ///
+    /// # Errors
+    ///
+    /// [`RecordError::InvalidWriterId`] when `id` is not 1 to 128 bytes of `[A-Za-z0-9._-]`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use turul_ai_catalog_storage::WriterId;
+    ///
+    /// assert_eq!(WriterId::new("operator.1")?.as_str(), "operator.1");
+    /// assert!(WriterId::new("10.0.0.1:443").is_err());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn new(id: impl Into<String>) -> Result<Self, RecordError> {
+        let id = id.into();
+        if is_id_text(&id) {
+            Ok(Self(id))
+        } else {
+            Err(RecordError::InvalidWriterId)
+        }
+    }
+
+    /// Returns the id as a string slice.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for WriterId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
     }
@@ -141,7 +190,8 @@ impl fmt::Display for RecordKey {
     }
 }
 
-/// The version of one stored record: the lowercase hex SHA-256 of its record bytes.
+/// The version of one stored record: for the host, the lowercase hex SHA-256 of its record bytes;
+/// for an entry, [`Etag::of_entry`].
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Etag(String);
 
@@ -159,6 +209,44 @@ impl Etag {
     /// ```
     pub fn of(record_bytes: &[u8]) -> Etag {
         Etag(hex(&Sha256::digest(record_bytes)))
+    }
+
+    /// Returns the version of an entry: the lowercase hex SHA-256 of the canonical JSON of the
+    /// two-element array `[entry JSON, provenance JSON]`, so a change of writer or expiry changes
+    /// the version.
+    ///
+    /// # Errors
+    ///
+    /// The [`ProvenanceError`] of [`Provenance::to_bytes`] when the provenance would not read
+    /// back, so no version exists for an entry no store can hold.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use turul_ai_catalog::identity::{ArtifactType, EntryIdentifier};
+    /// use turul_ai_catalog::model::{ArtifactSource, CatalogEntry};
+    /// use turul_ai_catalog_storage::{EntryRecord, Etag, Provenance, WriterId};
+    ///
+    /// let entry = CatalogEntry::new(
+    ///     EntryIdentifier::new("urn:air:example.com:mcp:weather"),
+    ///     ArtifactType::MCP_SERVER_CARD,
+    ///     ArtifactSource::Url("https://example.com/card.json".into()),
+    /// );
+    /// let record = EntryRecord::new(entry)?;
+    /// let a = Provenance::Curated { writer: WriterId::new("a")? };
+    /// let b = Provenance::Curated { writer: WriterId::new("b")? };
+    /// assert_ne!(Etag::of_entry(&record, &a)?, Etag::of_entry(&record, &b)?);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn of_entry(
+        record: &EntryRecord,
+        provenance: &Provenance,
+    ) -> Result<Etag, ProvenanceError> {
+        provenance.to_bytes()?;
+        let preimage = Json::Array(vec![record.entry().to_json(), provenance.to_json()])
+            .to_canonical_vec()
+            .map_err(|_| ProvenanceError::NotCanonical)?;
+        Ok(Etag::of(&preimage))
     }
 
     /// Returns the version as a string slice.

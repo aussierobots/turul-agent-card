@@ -34,7 +34,7 @@ use turul_ai_catalog_storage::{CatalogId, InMemoryCatalogStore};
 # futures::executor::block_on(async {
 let store = InMemoryCatalogStore::new();
 let catalog = CatalogId::new("default")?;
-let served = ServedCatalog::assemble(&store, &catalog).await?;
+let served = ServedCatalog::assemble(&store, &catalog, std::time::SystemTime::now()).await?;
 
 let request = Request::builder()
     .uri("/.well-known/ai-catalog.json")

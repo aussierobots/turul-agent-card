@@ -5,6 +5,50 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.0.21] - 2026-11-17
+
+**Breaking for anyone holding a store:** re-import under a new catalog id before deploying (see ADR-017).
+
+### Added
+
+- `turul_ai_catalog_storage::Registrar`: opt-in runtime registration over a `CatalogStore`. A `RegistrationPolicy` gives each `WriterId` a `WriterGrant` of `urn:air` publishers and non-`urn:air` identifier prefixes, and sets the lease length; a writer without a grant is refused. `register` creates, updates and refreshes; `unregister` removes the writer's own entry. A lease refresh writes only once less than three quarters of the lease remain. A grant permits leases only; `WriterGrant::with_curated` also permits curated entries, and a curated request under a lease-only grant is refused with `RegistrationError::CuratedNotGranted` before the store is read. Writers granted the same publisher or prefix share its identifiers: each may add versions of an identifier another registered, but cannot overwrite or remove the other's records. A grant may require a publisher signature, checked on every write by a `PublisherVerifier` given to `Registrar::new`; without one construction fails with `PolicyError::VerifierMissing`. See ADR-017.
+- `Provenance` (a lease with its writer and expiry, or curated with its writer), `ModeKind`, `WriterId` and `StoredEntry` in the storage crate. `StoreError` gains `ModeConflict` and `CorruptProvenance`: a put that would replace a record of the other mode fails atomically on every backend.
+- `assemble` leaves expired leases and entries that fail the current gate out of the served document and reports each in `Assembled::omitted` (`Omission`, `OmissionReason`); `Assembled::next_expiry` is the earliest expiry among the served leases.
+- `list_registrations` and `remove_registration` in the storage crate, and the CLI commands `turul-ai-catalog store list` and `store remove`, which list a store's entries with their provenance and expiry state and remove one entry by identifier and version. The backend is `--sqlite`, `--postgres` (CLI feature `postgres`) or `--table` (DynamoDB, CLI feature `dynamodb`), each also read from an environment variable, as is `--catalog-id`. The CLI now depends on `turul-ai-catalog-storage` (with `sqlite`) and `tokio`.
+- `turul-ai-catalog-trust` feature `registration`: `DidWebPublisherVerifier`, a `PublisherVerifier` that accepts an entry only with a verified `did-web-v1` publisher signature covering the entry and its artifact bytes, and `publisher_verdict`. The feature adds `turul-ai-catalog-storage`, `async-trait` and `tokio`; the default build is unchanged.
+- `turul_ai_catalog_trust::verify_entry` and `verify_entry_resolved`: the per-entry trust report.
+- `turul_ai_catalog::identity::is_root_did_web_domain`: the root `did:web` domain rule, now shared by `DidWebRoot::parse` and `WriterGrant::new`.
+- `StoreError::Contended`: the DynamoDB backend retries a write that conflicts with other writers' transactions at most 8 times, with jittered exponential backoff, then returns it; `Registrar::register` reports it as `RegistrationError::Contended`. The storage `dynamodb` feature adds `tokio` (`time`) for the backoff timer.
+- `PolicyError::LeaseTtlOutOfRange`: `RegistrationPolicy::new` refuses a lease length whose lease, written at the Unix epoch, would end past year 9999. `RegistrationError::ExpiryOutOfRange`: a lease whose `now + lease_ttl` ends past year 9999 is refused before the store is read, where it used to panic on overflow or store an expiry no read could parse.
+- `Provenance::to_json`.
+
+### Changed
+
+- `CatalogStore::put_entry` takes a `&Provenance`; `get_entry` and `list_entries` return `StoredEntry`. The entry `Etag` now covers the entry and its provenance, so every entry `Etag` changes value.
+- `assemble(store, catalog, now)` and `ServedCatalog::assemble(store, catalog, now)` take the time at which leases are judged.
+- `import(store, catalog, document, writer)` records every entry as curated by `writer`, and refuses an entry whose key holds a lease (`StoreError::ModeConflict`) or another writer's curated record (`ImportError::OwnedByAnotherWriter`). The writer id is permanent configuration for that catalog. `ServedCatalog::from_document` imports with a fixed writer id of its own; its signature is unchanged.
+- `SnapshotCache::new(served, max_age, clock)` takes the clock whose reading it passes to `assemble`, refreshes at the earlier of `max_age` and the snapshot's next lease expiry, and the Lambda logs one line per omitted entry on each assembly. `ServedCatalog` gains `omitted()` and `next_expiry()`.
+- `Registrar` owns its store and verifier: `Registrar::new(Arc<dyn CatalogStore>, CatalogId, RegistrationPolicy, Option<Arc<dyn PublisherVerifier>>)`, and `Registrar` has no lifetime, so it can live in a service's static state.
+- `Provenance::to_bytes` and `Etag::of_entry` return `Result<_, ProvenanceError>` and refuse a provenance whose bytes would not read back. Both are written by the core crate's canonical writer (`Json::to_canonical_vec`); stored bytes and entry `Etag`s are unchanged.
+- `import` reports a record other writers kept changing as `ImportError::Store(StoreError::Contended)`, not `PreconditionFailed`.
+- The workspace depends on `turul-ai-catalog-storage` without default features and on `tokio` with `rt` only; each crate asks for what it uses. The trust `registration` feature now adds storage without a backend and `tokio` with `rt` only, as ADR-017 states.
+- The illustrative MCP Server Card URL in the READMEs is `https://mcp.example.com/mcp/server-card` (turul-mcp servers serve `<streamable-http-url>/server-card`).
+
+### Compatibility
+
+- Records written before this release have no provenance and are not read as curated. sqlite and postgres `connect` fail on a table from an earlier release (the table gains `provenance` and `mode` columns); on DynamoDB such items read as `StoreError::CorruptProvenance`. Re-import under a new catalog id (sqlite: a new file; postgres: a new database), deploy the function on that id, then delete the old id's items. Never point the previous release at a new-format catalog id. See ADR-017.
+- `StoreError`, `ImportError` and `Assembled` gain variants or fields; all are `#[non_exhaustive]`.
+
+### Fixed
+
+- Every backend's `put_entry` refuses, with `StoreError::CorruptProvenance` and before touching the store, a provenance whose bytes would not read back, so no backend stores a record its own reads would refuse.
+- The sqlite and postgres backends report a stored mode that is missing or unknown as `StoreError::CorruptProvenance`, as DynamoDB does, instead of `StoreError::Backend` text.
+- The storage crate builds without default features under `-D warnings`; CI runs that clippy step.
+
+### Verification
+
+- fmt, clippy `-D warnings` (all storage features, Lambda `local`), all tests and doctests, the DynamoDB Local and PostgreSQL parity suites, and `cargo doc -D warnings` pass.
+
 ## [0.0.20] - 2026-11-17
 
 ### Added

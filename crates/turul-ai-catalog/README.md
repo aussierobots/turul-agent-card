@@ -28,7 +28,7 @@ let agent = CatalogEntry::new(
 let server = CatalogEntry::new(
     EntryIdentifier::new("urn:air:example.com:mcp:weather"),
     ArtifactType::MCP_SERVER_CARD,
-    ArtifactSource::Url("https://mcp.example.com/.well-known/mcp/server-card.json".into()),
+    ArtifactSource::Url("https://mcp.example.com/mcp/server-card".into()),
 );
 
 let mut catalog = AiCatalog::new(vec![agent, server]);
@@ -56,7 +56,7 @@ use turul_ai_catalog::validate::validate;
 
 let input = br#"{"specVersion":"1.0","entries":[
   {"identifier":"urn:air:example.com:mcp:weather","type":"application/mcp-server-card+json",
-   "url":"https://mcp.example.com/.well-known/mcp/server-card.json"}]}"#;
+   "url":"https://mcp.example.com/mcp/server-card"}]}"#;
 
 let catalog = parse(input).expect("a well-formed catalog");
 for d in validate(&catalog).diagnostics() {

@@ -2,8 +2,8 @@
 
 - **Status:** Proposed (accepted when every test file below is green, the `parity` registration checks for `in-memory` and `sqlite` in CI and for `postgres` and `dynamodb` against a live service; every entry write in the workspace carries a `Provenance`; no `put_entry` call site, `import` or `ServedCatalog::from_document` writes an entry without one; and `assemble` is the only code that decides whether a stored lease is served)
 - **Date:** 2026-11-17
-- **Implements:** under `crates/turul-ai-catalog-storage/tests/`: `provenance.rs`, `registration_policy.rs`, `registration.rs`, new checks in `parity/mod.rs` called by `in_memory.rs`, `sqlite.rs`, `postgres.rs` and `dynamodb.rs`, and migrated `assembly.rs`, `import.rs`, `records.rs`. Under `crates/turul-ai-catalog-trust/tests/`: `publisher_verifier.rs` (feature `registration`). Under `crates/turul-ai-catalog-lambda/tests/`: migrated `snapshot_refresh.rs`, `cold_start.rs`. `crates/turul-ai-catalog-cli/tests/dependency_direction.rs` gains `trust_registration_feature_adds_only_storage_async_trait_and_tokio` and keeps `storage_default_features_add_no_runtime_or_network_dependency`.
-- **Depends on:** ADR-016 (`CatalogStore`, `CatalogId`, `EntryRecord`, `RecordKey`, `Etag`, `Condition`, `StoreError`, guarantees 1 to 7, `assemble`, `import`, the four backends, the parity suite, `SnapshotCache`; changed by §4 to §7), ADR-015 (`TrustPolicy`, `verify_signature`, `entry_release_coverage`, `publisher_authorized`, `ManifestReport::endorsement`; gains `verify_entry`, §5), ADR-004 (`UrnAir`, `EntryKey`, `EntryIdentifier`), ADR-005 (`validate`, `Timestamp`), ADR-010 (the Lambda). Binding decisions: **M26** (this ADR's mandate), M19, M21, M24, M10, M6, M13.
+- **Implements:** under `crates/turul-ai-catalog-storage/tests/`: `provenance.rs`, `registration_policy.rs`, `registration.rs`, `operator.rs`, new checks in `parity/mod.rs` called by `in_memory.rs`, `sqlite.rs`, `postgres.rs` and `dynamodb.rs`, and migrated `assembly.rs`, `import.rs`, `records.rs`. Under `crates/turul-ai-catalog-trust/tests/`: `publisher_verifier.rs` (feature `registration`). Under `crates/turul-ai-catalog-lambda/tests/`: migrated `snapshot_refresh.rs`, `cold_start.rs`. Under `crates/turul-ai-catalog-cli/tests/`: `store_commands.rs`. `crates/turul-ai-catalog-cli/tests/dependency_direction.rs` gains `trust_registration_feature_adds_only_storage_async_trait_and_tokio` and keeps `storage_default_features_add_no_runtime_or_network_dependency`.
+- **Depends on:** ADR-016 (`CatalogStore`, `CatalogId`, `EntryRecord`, `RecordKey`, `Etag`, `Condition`, `StoreError`, guarantees 1 to 7, `assemble`, `import`, the four backends, the parity suite, `SnapshotCache`; changed by §4 to §7), ADR-015 (`TrustPolicy`, `verify_signature`, `entry_release_coverage`, `publisher_authorized`, `ManifestReport::endorsement`; gains `verify_entry`, §5), ADR-004 (`UrnAir`, `EntryKey`, `EntryIdentifier`), ADR-005 (`validate`, `Timestamp`), ADR-010 (the Lambda), ADR-012 (`DidWebRoot`, whose domain check moves to the core crate, §3.1). Binding decisions: **M26** (this ADR's mandate), M19, M21, M24, M10, M6, M13.
 - **Spec:** `target/upstream/ai-catalog/specification/ai-catalog.md` (last commit 2026-11-10).
 
 ## Context
@@ -30,15 +30,15 @@ The spec defines no registration protocol, writer identity, lease or expiry. It 
 ### 1. API shape: a `Registrar` over the store
 
 ```rust
-pub struct Registrar<'s> { /* store, catalog, policy, verifier */ }
+pub struct Registrar { /* store, catalog, policy, verifier */ }
 
-impl<'s> Registrar<'s> {
+impl Registrar {
     pub fn new(
-        store: &'s dyn CatalogStore,
+        store: Arc<dyn CatalogStore>,
         catalog: CatalogId,
         policy: RegistrationPolicy,
-        verifier: Option<&'s dyn PublisherVerifier>,
-    ) -> Result<Registrar<'s>, PolicyError>;
+        verifier: Option<Arc<dyn PublisherVerifier>>,
+    ) -> Result<Registrar, PolicyError>;
 
     pub async fn register(&self, writer: &WriterId, entry: CatalogEntry, mode: ModeRequest, now: SystemTime)
         -> Result<Registered, RegistrationError>;
@@ -55,6 +55,7 @@ pub struct Registered { pub etag: Etag, pub provenance: Provenance, pub written:
 - `register` creates, updates and refreshes: there is no separate refresh method. A refresh is a `register` of the same key by the same writer in `Lease` mode (§4).
 - `now` is a parameter, as in ADR-015 (AMB-334). Nothing in the storage crate reads the clock (§6).
 - One `Registrar` serves one `CatalogId`.
+- The `Registrar` owns its store and verifier through `Arc`s, so a service can keep one in static state and share it across tasks; it borrows nothing from its caller.
 
 ### 2. Writer identity
 
@@ -69,7 +70,7 @@ pub struct Registered { pub etag: Etag, pub provenance: Provenance, pub written:
 
 ```rust
 pub struct RegistrationPolicy { /* grants: BTreeMap<WriterId, WriterGrant>, lease_ttl: Duration */ }
-pub struct WriterGrant { /* publishers: BTreeSet<String>, prefixes: Vec<String>, require_publisher_signature: bool */ }
+pub struct WriterGrant { /* publishers: BTreeSet<String>, prefixes: Vec<String>, require_publisher_signature: bool, curated: bool */ }
 
 impl RegistrationPolicy {
     pub fn new(grants: impl IntoIterator<Item = (WriterId, WriterGrant)>, lease_ttl: Duration)
@@ -77,25 +78,29 @@ impl RegistrationPolicy {
 }
 impl WriterGrant {
     pub fn new(publishers: impl IntoIterator<Item = String>, prefixes: impl IntoIterator<Item = String>,
-               require_publisher_signature: bool) -> Result<WriterGrant, PolicyError>;
+               require_publisher_signature: bool) -> Result<WriterGrant, PolicyError>;   // leases only
+    pub fn with_curated(self) -> WriterGrant;                                            // also curated
 }
 
 #[non_exhaustive]
 pub enum PolicyError {
     EmptyGrant,                         // neither publishers nor prefixes
-    InvalidPublisher(String),           // empty, or contains ':'
+    InvalidPublisher(String),           // not a root did:web domain
     EmptyPrefix,
     UrnAirPrefix(String),               // starts with "urn:air:" in any ASCII case
     ZeroLeaseTtl,
+    LeaseTtlOutOfRange,                 // a lease of this length from the Unix epoch ends past year 9999
     DuplicateWriter(WriterId),
     VerifierMissing,                    // a grant requires a signature and no verifier was given
 }
 ```
 
-- **Publishers** are `urn:air` `{publisher}` components, compared byte for byte with `UrnAir::publisher()` (ADR-004, M24). No case folding, no subdomain or suffix match (#the-did-web-publisher-profile; AMB-27). A publisher that is empty or contains `:` could never equal a parsed component and is refused at construction. The root `did:web` domain restrictions are not applied here: they belong to `DidWebRoot` in the trust crate, which storage does not depend on; a grant that requires a signature gets them through the verifier (§5).
+- **Publishers** are `urn:air` `{publisher}` components, compared byte for byte with `UrnAir::publisher()` (ADR-004, M24). No case folding, no subdomain or suffix match (#the-did-web-publisher-profile; AMB-27). `WriterGrant::new` refuses, with `InvalidPublisher`, a publisher that is not a lowercase ASCII domain under the root `did:web` domain restrictions (#the-did-web-signer-profile: "lowercase ASCII, with no port, IP address, trailing root dot, or Unicode U-label"), which the publisher component "MUST satisfy" (#the-did-web-publisher-profile). The check is the one `DidWebRoot::parse` applies, with one definition: it moves from the trust crate to `turul_ai_catalog::identity::is_root_did_web_domain(&str) -> bool`, which `DidWebRoot::parse` calls after stripping `did:web:` and `WriterGrant::new` calls on each publisher. Storage still does not depend on trust (AMB-433).
 - **Prefixes** admit non-`urn:air` identifiers whose text starts with the prefix, byte for byte. A prefix starting with `urn:air:` in any ASCII case is refused, so no prefix can admit an identifier that looks like `urn:air` (#catalog-projection rule 3, AMB-423).
 - **No silent allow-all.** A grant must hold at least one publisher or prefix (`EmptyGrant`), and a writer without a grant is refused at `register` and `unregister` (`UnknownWriter`). There is no wildcard publisher or empty prefix (`EmptyPrefix`).
-- `lease_ttl` is set by the operator, not requested by the writer, so a writer cannot hold a lease for longer than the operator allows.
+- `lease_ttl` is set by the operator, not requested by the writer, so a writer cannot hold a lease for longer than the operator allows. An expiry is stored as RFC 3339, which writes four-digit years, so `RegistrationPolicy::new` refuses with `LeaseTtlOutOfRange` a length whose lease, written at the Unix epoch, would end past 9999-12-31T23:59:59.999999999Z: no write could ever store it. The policy reads no clock, so the epoch is its reference; a write whose own `now + lease_ttl` ends past year 9999 is refused at §3.2 step 5.
+- **Modes are granted.** A grant permits `Lease` only; `with_curated` also permits `Curated`. A curated entry never expires and, under a grant that requires a signature, is not verified again after its write (§5), so letting a writer choose it would let the writer, not the operator, decide whether its entry expires and whether it is re-verified. A `Curated` request under a lease-only grant is refused at §3.2 step 1, before any I/O (AMB-434).
+- **Co-granted writers share identifiers, not records.** Ownership is per record key (§3.3). Writers granted the same publisher or a prefix admitting the same identifier are each the operator's configured delegate for it (AMB-422), so each may add a version of an identifier the other registered, and the first record of an identifier fixes its version kind for both (M21). Neither can overwrite or remove the other's record. An operator that needs one writer per identifier grants disjoint publishers and prefixes (AMB-424).
 - `Registrar::new` refuses `VerifierMissing` when any grant sets `require_publisher_signature` and `verifier` is `None`, so the requirement can never be configured and silently skipped.
 
 What the allow-list means (AMB-422): configuring publisher `example.com` for a writer is the operator's assertion that this writer is that publisher or its authorized delegate. It is configured policy, not inference. #catalog-projection forbids inferring authorization "from the artifact's URL or an unsigned `publisher` field", and the `Registrar` never reads `url`, `publisher` or any other entry member for authority; only `identifier` is checked. Where the operator wants the publisher itself to prove it, the grant sets `require_publisher_signature`.
@@ -106,15 +111,15 @@ The first failure is returned. Every check that needs no I/O runs before the sto
 
 | Step | Check | Failure |
 |---|---|---|
-| 1 | `writer` has a grant | `RegistrationError::UnknownWriter` |
+| 1 | `writer` has a grant, and the grant permits the requested mode (`Curated` needs `with_curated`) | `RegistrationError::UnknownWriter`, `CuratedNotGranted` |
 | 2 | `EntryRecord::new(entry)` (ADR-016 record gate) | `Record(RecordError)` |
 | 3 | identifier: if `UrnAir::parse` succeeds, its publisher is in the grant's publishers; if it fails and the identifier starts with `urn:air:` in any ASCII case, refuse; otherwise the identifier starts with one of the grant's prefixes | `PublisherNotAllowed { publisher }`, `MalformedUrnAir`, `IdentifierNotAllowed` |
 | 4 | if the grant requires a signature, the identifier is `urn:air` (the profile's first requirement) | `SignatureRequiresUrnAir` |
-| 5 | `get_entry` of the key; when a record exists: its mode kind equals the requested one, and its writer equals `writer` | `ModeConflict { stored }`, `OwnedByAnotherWriter` |
+| 5 | for `Lease`, `now + lease_ttl` (checked addition) has an RFC 3339 form, before the read; then `get_entry` of the key; when a record exists: its mode kind equals the requested one, and its writer equals `writer` | `ExpiryOutOfRange`, `ModeConflict { stored }`, `OwnedByAnotherWriter` |
 | 6 | if the grant requires a signature, `verifier.verify_publisher(entry, now)` | `PublisherSignature(VerifierRefusal)` |
-| 7 | the conditional write (§4.3) | `Store(StoreError)`, `Contended` |
+| 7 | the conditional write (§4.3) | `Store(StoreError)`, `Contended` (also when the store exhausted its own retries, `StoreError::Contended`) |
 
-`unregister` runs steps 1 and 3 on the key's identifier, then step 5's writer check (mode is not checked: a writer may remove its own entry in either mode), then `delete_entry` with `expected: Some(etag)`. A missing record is `NotFound`. A `PreconditionFailed` re-reads and repeats from step 5, within the attempt bound of §4.3. Authority is evaluated against the current policy: a writer whose grant no longer covers an identifier cannot remove it, and the operator removes it with store credentials. No signature is required to remove: removal makes no claim about the artifact.
+`unregister` runs step 1's grant lookup and step 3 on the key's identifier, then step 5's writer check (mode is not checked: a writer may remove its own entry in either mode), then `delete_entry` with `expected: Some(etag)`. A missing record is `NotFound`. A `PreconditionFailed` re-reads and repeats from step 5, within the attempt bound of §4.3. Authority is evaluated against the current policy: a writer whose grant no longer covers an identifier cannot remove it, and the operator removes it with store credentials. No signature is required to remove: removal makes no claim about the artifact.
 
 #### 3.3 #catalog-projection obligations
 
@@ -123,7 +128,7 @@ The first failure is returned. Every check that needs no I/O runs before the sto
 | preserve a publisher-authorized `urn:air` identifier exactly | the `Registrar` never assigns, rewrites or normalises an identifier; the record holds the writer's identifier byte for byte (ADR-016 §4) |
 | never mint `urn:air` under another domain | the `Registrar` mints nothing; a `urn:air` identifier is accepted only under a publisher the operator granted to that writer, and no prefix can admit one (§3.1) |
 | MUST NOT infer authorization from URL or unsigned `publisher` | only `identifier` is checked (§3.1); with a signature required, authorization is the did:web publisher profile (§5) |
-| identifier stable, never reassigned to another artifact | a stored entry belongs to the writer that created it until it is deleted, expired or not (AMB-424); no other writer can overwrite it. Whether two registrations of one identifier name the same artifact is not observable to the library; it is the writer's duty, as ADR-016 §4 states for the store |
+| identifier stable, never reassigned to another artifact | a stored record belongs to the writer that created it until it is deleted, expired or not (AMB-424); no other writer can overwrite or remove it. Ownership is per record key `(identifier, version)`, not per identifier: writers granted the same publisher or prefix share that identifier's versions and its version kind (§3.1). Whether two registrations of one identifier, by one writer or by co-granted writers, name the same artifact is not observable to the library; it is the duty of the writers and of the publisher that delegated to them, as ADR-016 §4 states for the store |
 | re-registration from a new address is an update | the key is `(identifier, version)` and the owner is the `WriterId`; an address is never an input (§2) |
 | operator and publisher are distinct roles | the operator configures grants and writes the host (ADR-016 `put_host`); writers register entries; the `Registrar` never writes the host |
 
@@ -141,22 +146,23 @@ pub enum ModeKind { Lease, Curated }
 impl Provenance {
     pub fn kind(&self) -> ModeKind;
     pub fn writer(&self) -> &WriterId;
-    pub fn to_bytes(&self) -> Vec<u8>;                         // JCS
+    pub fn to_json(&self) -> Json;
+    pub fn to_bytes(&self) -> Result<Vec<u8>, ProvenanceError>;   // JCS, refused unless it reads back
     pub fn parse(bytes: &[u8]) -> Result<Provenance, ProvenanceError>;
 }
 ```
 
-- Bytes are the JCS (ADR-003 `Json::to_canonical_vec`) of `{"mode":"curated","writer":W}` or `{"expiresAt":T,"mode":"lease","writer":W}`, where `T` is `Timestamp`'s RFC 3339 `Display` (ADR-005). `Provenance::parse` accepts exactly these members; anything else is `ProvenanceError`. `expires_at` compares as an instant, never as a string.
+- Bytes are the JCS of `{"mode":"curated","writer":W}` or `{"expiresAt":T,"mode":"lease","writer":W}`, where `T` is `Timestamp`'s RFC 3339 `Display` (ADR-005), produced by the one canonical writer: `Provenance::to_json` builds the object and ADR-003's `Json::to_canonical_vec` writes it; nothing assembles the bytes by hand. `to_bytes` then refuses bytes that `parse` would refuse, with `parse`'s error: an instant outside the years 0000 to 9999 has no RFC 3339 form and is `ExpiresAt`. `Provenance::parse` accepts exactly these members; anything else is `ProvenanceError`. `expires_at` compares as an instant, never as a string.
 - `Provenance` is the one owner of these bytes. The schema is these two object shapes; `provenance::provenance_bytes_are_canonical` pins them against committed byte strings, which serve as its digest.
 
 #### 4.2 Where the mode lives: beside the record bytes, inside the `Etag` (AMB-421)
 
 - **Record bytes are unchanged**: still the JCS of the entry's own JSON, read by `parse::parse_entry` (ADR-016 §2). The served document and the entry's Trust Manifest payloads never see provenance.
 - **Provenance is stored beside them**, one value per entry record, with its mode kind as a separate column or attribute so a backend can test it in a write condition.
-- **The entry `Etag` covers both**: `Etag::of_entry(&EntryRecord, &Provenance)` is the lowercase hex SHA-256 of the JCS of the two-element array `[entry JSON, provenance JSON]`. The host `Etag` stays `Etag::of(&[u8])` over host record bytes. Reason: a `Matches(etag)` write must mean "nothing I read has changed", writer and expiry included. With an `Etag` over entry bytes alone, a refresh that changes only `expires_at` leaves the `Etag` unchanged, so a writer that read a lease as expired could overwrite it after its owner refreshed it. Equal stored state still gives equal `Etag`s on every backend (AMB-402 holds, over the wider content).
+- **The entry `Etag` covers both**: `Etag::of_entry(&EntryRecord, &Provenance) -> Result<Etag, ProvenanceError>` is the lowercase hex SHA-256 of the JCS of the two-element array `[entry JSON, provenance JSON]`, written by `Json::to_canonical_vec` over `Json::Array([CatalogEntry::to_json, Provenance::to_json])`; it refuses a provenance `to_bytes` refuses, so no version exists for an entry no store can hold. The host `Etag` stays `Etag::of(&[u8])` over host record bytes. Reason: a `Matches(etag)` write must mean "nothing I read has changed", writer and expiry included. With an `Etag` over entry bytes alone, a refresh that changes only `expires_at` leaves the `Etag` unchanged, so a writer that read a lease as expired could overwrite it after its owner refreshed it. Equal stored state still gives equal `Etag`s on every backend (AMB-402 holds, over the wider content).
 - `get_entry` and `list_entries` return `StoredEntry { record: EntryRecord, provenance: Provenance, etag: Etag }`; `Stored<R>` stays for the host.
 - `put_entry(&self, catalog: &CatalogId, record: &EntryRecord, provenance: &Provenance, condition: Condition) -> Result<Etag, StoreError>`. There is no entry write without a provenance.
-- `StoreError` gains `ModeConflict { stored: ModeKind }` and `CorruptProvenance { key: RecordKey, error: ProvenanceError }`.
+- `StoreError` gains `ModeConflict { stored: ModeKind }` and `CorruptProvenance { key: RecordKey, error: ProvenanceError }`. Every backend's `put_entry` takes the provenance bytes and the `Etag` from one crate-private helper, which refuses a provenance whose bytes would not read back with `CorruptProvenance` before the store is touched; a stored mode that is missing or unknown is `CorruptProvenance` on every backend, never `Backend` text.
 
 #### 4.3 Guarantee 8 and the write paths
 
@@ -166,12 +172,18 @@ Writer ownership and expiry are not backend guarantees. They are decided above t
 
 1. `get_entry`. Absent: `put_entry` with `Condition::Absent`.
 2. Present: refuse `ModeConflict` when its mode kind differs, `OwnedByAnotherWriter` when its writer differs.
-3. Present, same writer: for `Lease`, the new `expires_at` is the later of the stored one and `now + lease_ttl`, so a refresh never shortens a lease, whatever order instances run in. When the record bytes and the new provenance equal the stored ones, nothing is written and `Registered.written` is `false` (idempotent). Otherwise `put_entry` with `Condition::Matches(stored etag)`.
-4. `PreconditionFailed` re-reads and repeats from 1. Each repeat follows a write another writer committed. After 8 attempts the result is `RegistrationError::Contended`.
+3. Present, same writer. `Curated`: when the record bytes equal the stored ones, nothing is written; otherwise `put_entry` with `Condition::Matches(stored etag)`. `Lease`, with `slack = lease_ttl / 4`:
+   - **Refresh** (record bytes equal the stored ones): when the stored `expires_at` is at or after `now + lease_ttl − slack`, nothing is written. Otherwise `put_entry` with `expires_at = now + lease_ttl` and `Condition::Matches(stored etag)`. A written expiry is later than the stored one by more than `slack`, so a refresh never shortens a lease.
+   - **Update** (record bytes differ): `put_entry` with `expires_at` the later of the stored one and `now + lease_ttl`, `Condition::Matches(stored etag)`.
+
+   When nothing is written the result is `Ok` with the stored `Etag` and `Registered.written` is `false`.
+4. `PreconditionFailed` re-reads and repeats from 1. Each repeat follows a write another writer committed. After 8 attempts the result is `RegistrationError::Contended`. A backend that exhausts its own bounded retries (DynamoDB, ADR-016 §6) returns `StoreError::Contended`, also reported as `RegistrationError::Contended`.
+
+For a lease, the granted expiry `now + lease_ttl` and the due instant `now + lease_ttl − slack` are computed before step 1 with checked addition, and one that has no RFC 3339 form (past year 9999) is `ExpiryOutOfRange`, without I/O and without a panic.
 
 `Registrar::register` steps 5 to 7 (§3.2) are this function: its read is step 5, the verifier (step 6) runs between the read and the conditional write, and a retry re-reads without verifying again, since the entry has not changed.
 
-A lease refresh is therefore an idempotent conditional write with no counter: N instances refreshing one lease at once all return `Ok`, at most one write per distinct later expiry commits, and the stored expiry is the latest any of them asked for.
+**Many instances refreshing one lease (AMB-430).** Refreshes of one lease have equal intent, and the rule makes them compute equal state, whatever `now` each instance passes. Once one refresh commits with `now_w`, the stored expiry is `now_w + lease_ttl`, and every instance whose `now` is less than `now_w + slack` finds the lease not due and returns `Ok` without writing. Two committed refreshes therefore need `now` values more than `slack` apart: at most one refresh write commits per `slack` window. An instance's `Matches` fails only after another refresh committed, so when the racing instances' `now` values lie within one `slack` window, exactly one write commits and each instance makes at most two attempts, however many instances there are. Generally, racing instances whose `now` values span `D` commit at most `⌊D / slack⌋ + 1` writes, so `Contended` needs `D` of at least `7 × slack` (`1.75 × lease_ttl`). Concurrent updates with equal new bytes converge the same way: after the first commits, the rest are refreshes.
 
 #### 4.4 Interaction with M21 (version-kind guard)
 
@@ -183,8 +195,9 @@ A lease refresh is therefore an idempotent conditional write with no counter: N 
 
 - `import(store, catalog, document, writer: &WriterId)` writes every entry with `Provenance::Curated { writer }` through `write_owned`. It refuses an entry whose key holds a lease (`ImportError::Store(StoreError::ModeConflict)`) or a curated record of another writer (`ImportError::OwnedByAnotherWriter`). It runs no allow-list: `import` is the operator's path, as in ADR-016, and its authority is whoever holds the store credentials (§2).
 - The CLI `produce` commands still write files only (ADR-016 AMB-406). Their curated route into a store is `produce` → file → `import`, which records `Curated`.
+- **The curated writer id is permanent configuration.** `import` refuses curated records of another writer, so an import with a changed writer id fails at the first entry the catalog already holds. If the id changes or is lost, the operator deletes the catalog id's items (entry records and guards) with store credentials, then re-imports with the new id; leases deleted with them are recreated by their owners' next refresh (§4.3 step 1). A function serving that catalog id meanwhile can assemble a partial catalog; the §4.7 sequence with a new catalog id avoids that window. The README states this where it documents `import` (R1).
 - `ServedCatalog::from_document` imports into a store private to the call with the writer id `from-document`, a constant private to the Lambda crate; its signature does not change.
-- `Registrar::register` with `ModeRequest::Curated` is the same write after §3 authority, for an operator that grants curated registration through an authenticated channel.
+- `Registrar::register` with `ModeRequest::Curated` is the same write after §3 authority, for a writer whose grant the operator made with `with_curated` (§3.1). A lease-only grant asking for `Curated` is refused with `CuratedNotGranted` at step 1.
 
 #### 4.6 Backend schema and keys
 
@@ -199,9 +212,21 @@ A lease refresh is therefore an idempotent conditional write with no counter: N 
 
 `connect` for sqlite and postgres probes `SELECT provenance, mode FROM catalog_records LIMIT 0` after `CREATE TABLE IF NOT EXISTS`, and fails with `StoreError::Backend` naming the missing column on a table created by an earlier release. A DynamoDB entry item without `provenance` reads as `StoreError::CorruptProvenance`.
 
-#### 4.7 Records stored by earlier releases (AMB-427)
+#### 4.7 Records stored by earlier releases, and upgrading a live store (AMB-427, AMB-431)
 
-Every record stored before this ADR is curated in fact, but has no writer. It is not read as curated: a record without a writer cannot satisfy ownership (§3.3), and reading a missing value as a default is a compatibility path, which this repository does not keep. A deployer re-runs `import` of its curated catalog file, with its writer id, into an empty catalog or a new table or database. Until then the store fails loudly: SQL `connect` fails, and a DynamoDB assembly fails with `CorruptProvenance`, so the Lambda fails cold start or keeps its last good snapshot (ADR-016 AMB-407). No migration code is written.
+Every record stored before this ADR is curated in fact, but has no writer. It is not read as curated: a record without a writer cannot satisfy ownership (§3.3), and reading a missing value as a default is a compatibility path, which this repository does not keep. Until re-imported the store fails loudly: SQL `connect` fails, and a DynamoDB assembly fails with `CorruptProvenance`, so the Lambda fails cold start or keeps its last good snapshot (ADR-016 AMB-407). No migration code is written.
+
+The supported upgrade of a store being served:
+
+1. `import` the curated catalog file with the new release, with its permanent writer id (§4.5), under a **new** `CatalogId` in the same table. Every writer moves to the new release and registers into the new id.
+2. Deploy the new function with `TURUL_AI_CATALOG_ID` set to that id.
+3. Delete the old id's items (every item with `pk` = the old id: entry records and `"g:"` guards) with store credentials.
+
+Until step 2 the previous function serves the old id unchanged; from step 2 the new function serves the new id. Neither assembly reads the other's items (ADR-016 guarantee 5); `dynamodb::old_and_new_format_catalog_ids_share_a_table` pins it. The test is DynamoDB's own, not a `parity` check: only DynamoDB can hold both formats in one table, since in-memory stores never outlive a release and SQL `connect` refuses an earlier table. A SQL store follows the same three steps with a new database (sqlite: a new file) in place of the new catalog id.
+
+**The previous release must never be pointed at a new-format catalog id.** It knows nothing of provenance: on DynamoDB its `Any` replace writes an entry item without `provenance` or `mode`, which then reads as `CorruptProvenance` and fails every assembly of that id by the new release, and it bypasses guarantee 8; on SQL its entry writes either fail the new `CHECK` or replace record bytes without regard to provenance, so the entry `Etag` and guarantee 8 no longer hold. Nothing in the previous release can detect this.
+
+The R1 release's `CHANGELOG.md` entry starts with the line `**Breaking for anyone holding a store:** re-import under a new catalog id before deploying (see ADR-017).`
 
 ### 5. Optional publisher signature
 
@@ -216,21 +241,66 @@ pub trait PublisherVerifier: Send + Sync {
 pub struct VerifierRefusal(pub String);   // the verifier's reason, as text
 ```
 
-- The trust crate gains feature `registration` (off by default), which adds exactly `turul-ai-catalog-storage` (`default-features = false`; that set is the core crate, `async-trait` and `sha2`), `async-trait` and `tokio` (`rt`), and the type `DidWebPublisherVerifier { policy: TrustPolicy }` implementing `PublisherVerifier`. The trust crate's default dependency set is unchanged. There is no cycle: storage → core; trust → core, client and, under the feature, storage. Crypto and network stay out of every storage feature.
+- The trust crate gains feature `registration` (off by default), which adds exactly `turul-ai-catalog-storage` (`default-features = false`, so no backend; that set is the core crate, `async-trait` and `sha2`), `async-trait` and `tokio` (`rt` only), and the type `DidWebPublisherVerifier { policy: TrustPolicy }` implementing `PublisherVerifier`. The trust crate's default dependency set is unchanged. There is no cycle: storage → core; trust → core, client and, under the feature, storage. Crypto and network stay out of every storage feature.
 - The trust crate gains `verify_entry(entry: &CatalogEntry, base: Option<&str>, policy: &TrustPolicy, now: SystemTime) -> EntryReport<'_>`: resolve the distinct signers of the entry's manifests that pass `precheck`, then the same crate-private `entry_report` that `verify_resolved` uses. One per-entry procedure serves both; `verify` keeps its tree walk. ADR-015 records this in its revision log in the implementing slice.
 - `DidWebPublisherVerifier::verify_publisher` runs `verify_entry(entry, None, &policy, now)` on a blocking thread (`tokio::task::spawn_blocking`, since resolution and integrity fetch block, ADR-015 §5) and accepts when at least one manifest's `endorsement()` is `Endorsement::Publisher`: an accepted `did-web-v1` signature in its time window (#signature-acceptance-and-time), Entry Release Coverage including `digest` and verified artifact bytes (#entry-release-coverage), and `publisher_authorized` (the root `did:web` domain rule and exact `did:web:` + publisher equality, #the-did-web-publisher-profile). Otherwise the refusal names each manifest's outcome. An assessor's signature never passes. `base` is `None`: a relative `url` cannot be fetched for integrity and so is refused.
-- The verification is a write-time gate (AMB-425). It runs on every write by a grant that requires it, refreshes included, so a manifest that has expired since the last refresh stops the lease from being extended, and the entry leaves the catalog when its lease runs out. A curated entry verified at write is not re-verified. Consumers still verify for themselves (ADR-015): a stored entry passed this gate once and is never presented as endorsed by the store or the served document.
+- The verification is a write-time gate (AMB-425). It runs on every write by a grant that requires it, refreshes included, so a manifest that has expired since the last refresh stops the lease from being extended, and the entry leaves the catalog when its lease runs out. A curated entry verified at write is not re-verified, which is why curated registration is the operator's grant, never the writer's choice (§3.1). Consumers still verify for themselves (ADR-015): a stored entry passed this gate once and is never presented as endorsed by the store or the served document.
 
 ### 6. Expiry and assembly
 
 - `assemble(store: &dyn CatalogStore, catalog: &CatalogId, now: SystemTime) -> Result<Assembled, AssembleError>`. A lease is live while `now < expires_at`, the half-open window the spec uses for `expiresAt`; at `expires_at` it is expired. No skew is applied: one clock (the assembler's) decides.
-- `Assembled { bytes, report, omitted: Vec<Omission> }`, `Omission { key: EntryKey, provenance: Provenance, reason: OmissionReason }`, `OmissionReason::{LeaseExpired { expires_at: Timestamp }, Invalid(Report)}`, all `#[non_exhaustive]`. Every listed entry record is either in `bytes` or in `omitted`; assembly never drops one silently.
+- `Assembled { bytes, report, omitted: Vec<Omission>, next_expiry: Option<Timestamp> }`, `Omission { key: EntryKey, provenance: Provenance, reason: OmissionReason }`, `OmissionReason::{LeaseExpired { expires_at: Timestamp }, Invalid(Report)}`, all `#[non_exhaustive]`. Every listed entry record is either in `bytes` or in `omitted`; assembly never drops one silently. `next_expiry` is the earliest `expires_at` among the leases in `bytes` (`None` when it holds none), taken from the provenance assembly already reads: no extra store read.
 - ADR-016 §4 steps change as follows: after listing, expired leases are moved to `omitted`; the rest are sorted and validated as one document. When that document has error diagnostics, each remaining entry is run through the record gate's validation; entries that fail it are moved to `omitted` as `Invalid` with their own report, and the document is validated again. Errors that remain (cross-entry, such as #multi-version-entries' identifier-alone rule in a store this crate did not write) still fail with `AssembleError::Invalid`, because the spec does not say which of the conflicting entries to drop (AMB-426). `Invalid` covers records that passed an earlier release's gate and fail the current one.
 - The result is a pure function of committed records and `now`: equal state and equal `now` give equal bytes on every backend. A lease expiring changes the assembled snapshot; the served document still carries no catalog signature (#catalog-snapshot-coverage; ADR-016 §4). Expiry depends on the clock, never on the caller, so this is not #dynamic-discovery.
 - The clock is read only by callers: `SnapshotCache` (Lambda), a registrar's host, tests. `registration::storage_source_never_reads_the_clock` scans the storage crate's `src/` for `SystemTime::now` and `Instant::now`.
-- **Lambda.** `SnapshotCache` passes its clock's `now` to `assemble`. `main` writes one stderr line per omission per assembly (key, writer, reason), so an omission is reported once per `max_age` per warm instance. ADR-010 is updated in the implementing slice.
-- **`max_age` versus lease length (AMB-429).** A registration appears, and an expired lease disappears, up to `max_age` late per warm instance. A live lease is never missing from a served snapshot when the writer's refresh interval + `max_age` + clock skew between hosts is less than `lease_ttl`; the README states this rule. The library does not check it: `lease_ttl` lives in the `RegistrationPolicy` of a registrar process and `max_age` in the Lambda's environment, and no shared configuration exists between them; adding one would be a new control.
-- **Expired records stay** until their owner unregisters them, the operator deletes them, or a write to the same key by the same writer replaces them. A reaper is a new control and is not built (open question 1).
+- **Lambda.** `SnapshotCache` passes its clock's `now` to `assemble`. `main` writes one stderr line per omission per assembly (key, writer, reason), so an omission is reported once per refresh per warm instance. ADR-010 is updated in the implementing slice.
+- **Snapshot freshness (AMB-432).** `SnapshotCache` refreshes at the earlier of `max_age` after assembly and the snapshot's `next_expiry`: a request at or after either re-assembles before `handle`. An expired lease is therefore never served past its expiry by the cache's clock, where a refresh by `max_age` alone would serve it up to a whole `max_age` late. One exception stands from ADR-016 AMB-407: a failed re-assembly keeps the last good snapshot, which can hold a lease past its expiry, and schedules the next attempt `max_age` later; the failure is logged. The cache is in-process only: each warm instance has its own, and no cross-process check of cache age exists (not built).
+- **Lease length (AMB-429).** A registration appears up to `max_age` late per warm instance; an expired lease leaves at the first request at or after its expiry. A live lease is never missing from a served snapshot when its owner's due refresh commits before expiry: refresh interval + clock skew between the registrar's and the Lambda's hosts < `lease_ttl − slack` (§4.3), which `lease_ttl ≥ 4 ×` the refresh interval (§7) satisfies for skew below `lease_ttl / 2`. `max_age` no longer enters the rule. The README states it. The library does not check it: `lease_ttl` lives in the `RegistrationPolicy` of a registrar process, the refresh interval in each service, and no shared configuration exists between them; adding one would be a new control.
+- **Expired records stay** until their owner unregisters them, the operator deletes them (§7), or a write to the same key by the same writer replaces them. A reaper is a new control and is not built (open question 1).
+
+### 7. Deployment
+
+Authority holds only if no registering service's role can write the table; the registrar runs under its own role. Registering services reach the registrar through the deployer's authenticated channel (§2); only the registrar's role and the operator's `import` role hold ADR-016 §7's writer actions, and the serving role reads only.
+
+- **When a service registers.** A service registers once it is serving, never during init: a lease claims the artifact is reachable, and one left by an init that then fails stays served until it expires.
+- **Refresh failures.** A refresh that fails, including a `PublisherSignature` refusal because the DID document or the artifact could not be fetched, is reported by the service and retried at its next interval; it is not fatal while the lease has time left. Recommended: `lease_ttl ≥ 4 ×` the refresh interval. Then the first due refresh after a write comes while at least `lease_ttl / 2` remains, so at least two consecutive failed due refreshes pass before the lease expires, and the next successful refresh after expiry restores the entry.
+- **Removing a stale lease.** Its owner calls `Registrar::unregister(&writer, &key)`. Otherwise the operator, with store credentials, deletes it by its `EntryKey` (an `Omission.key` from assembly, §6), conditioned on the version it read so that a refresh in between makes the delete fail rather than remove a live lease:
+
+```rust
+use std::time::SystemTime;
+use turul_ai_catalog::{identity::{EntryIdentifier, EntryKey}, timestamp::Timestamp};
+use turul_ai_catalog_storage::{CatalogId, CatalogStore, Provenance, StoreError};
+
+async fn remove_expired_lease(store: &dyn CatalogStore, catalog: &CatalogId, key: &EntryKey)
+    -> Result<bool, StoreError> {
+    let Some(stored) = store.get_entry(catalog, key).await? else { return Ok(false) };
+    let Provenance::Lease { expires_at, .. } = &stored.provenance else { return Ok(false) };
+    if *expires_at > Timestamp::from_system_time(SystemTime::now()) { return Ok(false) }
+    store.delete_entry(catalog, key, Some(&stored.etag)).await?;   // PreconditionFailed if refreshed
+    Ok(true)
+}
+
+let key = EntryKey::new(EntryIdentifier::new("urn:air:example.com:a2a:billing"), Some("1.0.0".into()));
+remove_expired_lease(&store, &catalog, &key).await?;
+```
+
+The operator's command for the same removal is §8. The README carries this section (R3).
+
+### 8. Operator store command
+
+Maintainer decision M27. `turul-ai-catalog store` lists the entries of a store with their provenance and expiry state, and removes one entry by `EntryKey`. It is an operator tool run with store credentials; it grants no authority a holder of those credentials lacks (§2, §7).
+
+```
+turul-ai-catalog store list   BACKEND --catalog-id ID
+turul-ai-catalog store remove BACKEND --catalog-id ID --identifier IDENTIFIER [--version VERSION]
+BACKEND: --sqlite PATH | --postgres URL | --table NAME
+```
+
+- **Backend and catalog.** Exactly one backend, by a required `clap` group; each flag also reads an environment variable (a flag wins over its own variable; two different backends set at once are a usage error). `--table` (DynamoDB) reads `TURUL_AI_CATALOG_TABLE` and `--catalog-id` reads `TURUL_AI_CATALOG_ID`, the Lambda's variables (ADR-010); `--sqlite` reads `TURUL_AI_CATALOG_SQLITE` and `--postgres` reads `TURUL_AI_CATALOG_POSTGRES_URL`. SQLite is always built; `--postgres` needs the CLI feature `postgres` and `--table` the feature `dynamodb`. Credentials for DynamoDB come from the AWS default chain, as in the Lambda; the in-memory store is not selectable, since it holds nothing across processes. The CLI connects (the constructors of ADR-016) and runs a current-thread `tokio` runtime; it holds no other logic.
+- **Owner.** `turul_ai_catalog_storage::list_registrations(store, catalog, now)` returns one `Registration { key, provenance, expiry }` per stored entry, ordered by `EntryKey`, with `expiry` `Never` (curated), `Live(expires_at)` or `Expired(expires_at)` by the rule of §6 (a lease is live while `now` is before `expires_at`). `remove_registration(store, catalog, key)` reads the entry, deletes it conditioned on the read `Etag` (so a refresh in between fails the delete, §7) and returns its `Provenance`; it removes an entry of either mode. `RemoveError::{NotFound, Store}`. Both are over `&dyn CatalogStore`, so every backend behaves alike; `Registration` has a `Display` form of one line, `identifier  version-or-"-"  mode  writer  state`, which is for people and not a contract.
+- **`list`** writes one line per entry to stdout, through `DisplayText`, and exits 0, also for an empty store and for expired leases.
+- **`remove`** matches the `EntryKey` exactly: no `--version` is the unversioned key, never every version (ADR-011 AMB-344). It writes `removed <identifier>[@version]` to stdout.
+- **Exit codes** (ADR-011): 0 done; 2 usage error (`clap`), no backend selected or two selected, an invalid catalog id, a backend failure, no entry under the key (`NotFound`), or a delete refused because the entry changed since it was read. Exit 1 is not used: it means an error diagnostic in a loaded document, and neither command validates one. Failures go to stderr through `DisplayText`.
 
 ## Owning symbols and entrypoints
 
@@ -240,14 +310,17 @@ pub struct VerifierRefusal(pub String);   // the verifier's reason, as text
 | Writer authority | `RegistrationPolicy::new`, `WriterGrant::new` | `Registrar::new` |
 | Registration and removal | `Registrar::register`, `Registrar::unregister` | deployer's authenticated endpoint |
 | Ownership, refresh and mode checks before a write | crate-private `write_owned` | `Registrar::register`, `import` |
-| Entry mode and writer | `Provenance` (`to_bytes`, `parse`) | `put_entry`, every backend's reads |
+| Entry mode and writer | `Provenance` (`to_json`, `to_bytes`, `parse`) | `put_entry`, every backend's reads |
 | Entry version | `Etag::of_entry(&EntryRecord, &Provenance)`; host `Etag::of` | every backend, via the crate |
 | Mode exclusion | `CatalogStore::put_entry`, guarantee 8 | four backends |
 | Publisher signature seam | `PublisherVerifier` (storage); `DidWebPublisherVerifier` (trust, feature `registration`) | `Registrar::register` step 6 |
 | Per-entry trust evaluation | `turul_ai_catalog_trust::verify_entry` (shares `entry_report` with `verify_resolved`) | `DidWebPublisherVerifier` |
-| Served document and omissions | `assemble(store, catalog, now)` | `ServedCatalog::assemble`, `SnapshotCache` |
+| Served document, omissions and next expiry | `assemble(store, catalog, now)` | `ServedCatalog::assemble`, `SnapshotCache` |
+| Served snapshot refresh time | `turul_ai_catalog_lambda::SnapshotCache` (earlier of `max_age` and `Assembled::next_expiry`) | Lambda `main` |
 | `urn:air` grammar | `turul_ai_catalog::identity::UrnAir` (ADR-004) | `Registrar` step 3, `publisher_authorized` |
+| Root `did:web` domain rule | `turul_ai_catalog::identity::is_root_did_web_domain` (moved from `DidWebRoot::parse`) | `DidWebRoot::parse`, `WriterGrant::new` |
 | Instant | `turul_ai_catalog::Timestamp` (ADR-005) | `Provenance`, `assemble` |
+| Operator listing and removal | `list_registrations`, `remove_registration` (storage) | `turul-ai-catalog store list`, `store remove` |
 
 Schema digests: provenance bytes are pinned by `provenance::provenance_bytes_are_canonical`; entry record bytes are unchanged (ADR-016). Determinism: `parity::same_state_and_now_assemble_to_the_same_bytes`.
 
@@ -272,10 +345,14 @@ Paths are under `crates/turul-ai-catalog-storage/tests/` unless stated. `parity:
 | M26 allow-list (non-`urn:air`) | operator-configured prefixes | `registration::non_urn_air_outside_every_prefix_is_refused`, `registration::non_urn_air_under_a_prefix_is_accepted` |
 | M26 refuse when none | no silent allow-all | `registration_policy::empty_grant_is_refused`, `registration_policy::empty_prefix_is_refused`, `registration::unknown_writer_is_refused` |
 | M26 optional signature | signed Trust Manifest required when configured | `registration::required_signature_is_checked_by_the_verifier`, `registration::signature_not_required_never_calls_the_verifier`, `registration_policy::signature_required_without_verifier_is_refused` |
-| M26 modes | lease and curated refuse each other | `parity::lease_and_curated_puts_refuse_each_other` (`Any` in both directions), `parity::racing_cross_mode_puts_leave_one_mode` (16 writers, four rounds), `registration::curated_registration_over_a_lease_is_refused`, `import::import_refuses_a_lease_record`, `import::import_records_curated_provenance` |
-| M26 lease refresh | idempotent conditional write, many instances | `parity::concurrent_lease_refreshes_converge` (16 instances, one key: all `Ok`, record bytes unchanged, stored expiry = the latest requested), `registration::refresh_never_shortens_a_lease`, `registration::identical_refresh_writes_nothing` |
+| M26 modes | lease and curated refuse each other | `parity::lease_and_curated_puts_refuse_each_other` (`Any` in both directions), `parity::racing_cross_mode_puts_leave_one_mode` (16 writers, four rounds), `registration::curated_registration_over_a_lease_is_refused`, `import::import_refuses_a_lease_record`, `import::import_records_curated_provenance`, `import::import_under_another_writer_id_is_refused` |
+| M26 lease refresh | idempotent conditional write, many instances | `parity::many_instances_refreshing_one_lease_all_succeed` (a counting wrapper over the backend; 64 instances, more than the 8-attempt bound, each passing a distinct `now` within one `slack` window, against a due lease: all `Ok`, exactly one committed write, stored expiry = that writer's `now + lease_ttl`, record bytes unchanged; repeated over four consecutive `slack` windows: at most one committed write per window), `registration::refresh_is_a_no_op_until_due` (stored expiry equal to `now + lease_ttl − slack`: `Ok`, stored `Etag`, `written: false`, no `put_entry`; `now` one nanosecond later: one write with `expires_at = now + lease_ttl`), `registration::refresh_never_shortens_a_lease` |
 | M26 assembly report | expired or omitted entries reported | `assembly::expired_lease_is_omitted_and_reported`, `assembly::lease_is_live_until_expires_at` (live one nanosecond before, omitted at), `assembly::entry_failing_the_current_gate_is_omitted_and_reported`, `assembly::cross_entry_error_still_fails_assembly`, `assembly::every_listed_entry_is_served_or_omitted`, `parity::same_state_and_now_assemble_to_the_same_bytes`; lambda `snapshot_refresh::omissions_are_reported_on_each_assembly`, `snapshot_refresh::expired_lease_leaves_the_served_catalog_at_the_next_refresh` |
 | M26 unregister | removal by the same writer, with authority | `parity::unregister_by_another_writer_is_refused`, `parity::unregister_frees_the_identifier`, `registration::unregister_needs_current_authority`, `registration::unregister_of_a_missing_entry_is_not_found` |
+| M27 list | list entries with provenance and expiry state | `operator::list_reports_provenance_and_expiry_state` (in-memory, sqlite); cli `store_commands::list_prints_provenance_and_expiry_state` |
+| M27 remove | remove by entry key; exact key; conditioned on the read version | `operator::remove_deletes_exactly_the_named_key`, `operator::remove_of_a_missing_key_is_not_found` (in-memory, sqlite); cli `store_commands::remove_deletes_the_entry_and_exits_0`, `store_commands::remove_without_a_match_exits_2` |
+| M27 backend selection and exit codes | one backend by flag or environment; exit 0 or 2 (ADR-011) | cli `store_commands::no_backend_is_a_usage_error`, `store_commands::two_backends_are_a_usage_error`, `store_commands::backend_and_catalog_id_come_from_the_environment` |
+| M27 layering | the CLI parses arguments and connects; listing and removal live in storage | cli `dependency_direction::cli_dependencies_are_exactly_the_allowed_set` |
 
 Decisions owned here:
 
@@ -285,14 +362,22 @@ Decisions owned here:
 | AMB-421 | provenance beside record bytes, inside the entry `Etag`; guarantee 8 atomic | `provenance::provenance_bytes_are_canonical`, `provenance::provenance_round_trips`, `provenance::etag_covers_entry_and_provenance`, `parity::provenance_reads_back_exactly`, `parity::etag_is_the_digest_of_entry_and_provenance` (replaces ADR-016's `etag_is_the_digest_of_the_record_bytes` for entries), `parity::stored_entry_reads_back_byte_identical` (record bytes unchanged) |
 | AMB-422 | the allow-list is configured delegation; only `identifier` is read | `registration::url_and_publisher_field_never_grant_authority` |
 | AMB-423 | no prefix can admit `urn:air`; malformed `urn:air` refused | `registration_policy::urn_air_prefix_is_refused`, `registration::malformed_urn_air_is_refused` |
-| AMB-424 | ownership per key until deleted, no takeover after expiry | `parity::another_writer_cannot_take_over_an_entry` |
-| AMB-425 | signature gate on every write by a requiring grant; seam trait in storage, implementation in trust | `registration::refresh_with_an_expired_signature_does_not_extend_the_lease`; cli `dependency_direction::trust_registration_feature_adds_only_storage_async_trait_and_tokio`, `dependency_direction::storage_default_features_add_no_runtime_or_network_dependency` (kept: no storage feature depends on trust or client) |
+| AMB-424 | ownership per key until deleted, no takeover after expiry; co-granted writers share an identifier's versions, never each other's records | `parity::another_writer_cannot_take_over_an_entry`, `registration::co_granted_writers_share_an_identifier_but_not_its_records` |
+| AMB-425 | signature gate on every write by a requiring grant; seam trait in storage, implementation in trust | `registration::refresh_with_an_expired_signature_does_not_extend_the_lease`; cli `dependency_direction::trust_registration_feature_adds_only_storage_async_trait_and_tokio` (also pins storage without default features and `tokio` with `rt` only), `dependency_direction::storage_default_features_add_no_runtime_or_network_dependency` (kept: no storage feature depends on trust or client) |
 | AMB-426 | per-entry gate failures omitted; cross-entry errors still fail | `assembly::entry_failing_the_current_gate_is_omitted_and_reported`, `assembly::cross_entry_error_still_fails_assembly` |
 | AMB-427 | earlier records are not read as curated; re-import | `sqlite::table_from_an_earlier_release_fails_connect`, `postgres::table_from_an_earlier_release_fails_connect`, `dynamodb::item_without_provenance_is_corrupt` |
 | AMB-428 | check order of §3.2; local refusals do no I/O, state refusals no network | `registration::checks_run_in_the_documented_order` (one request per step, each failing only that step; the stub verifier is called only at step 6, the store only from step 5) |
-| AMB-429 | `max_age` against lease length is documented, not checked | none (no behaviour) |
+| AMB-429 | refresh interval and clock skew against lease length are documented, not checked | none (no behaviour) |
+| AMB-430 | a refresh writes only when due (`slack = lease_ttl / 4`) | `parity::many_instances_refreshing_one_lease_all_succeed`, `registration::refresh_is_a_no_op_until_due` |
+| AMB-431 | upgrade under a new catalog id in the same table; formats do not disturb each other | `dynamodb::old_and_new_format_catalog_ids_share_a_table` (old-format items written raw under id A as the previous release writes them, guards included; `import` under id B: `assemble(B)` equals the committed expected bytes, A's items are byte-identical afterwards, `assemble(A)` fails `CorruptProvenance` and `assemble(B)` is unchanged; deleting A's items leaves `assemble(B)` unchanged) |
+| AMB-432 | the snapshot refreshes at the earlier of `max_age` and the next lease expiry | `assembly::next_expiry_is_the_earliest_served_lease_expiry` (expired and curated records do not count; `None` without leases); lambda `snapshot_refresh::snapshot_is_reassembled_at_the_next_lease_expiry` (`max_age` one hour, a lease expiring in ten seconds: a request at its expiry re-assembles and the lease is gone), `snapshot_refresh::failed_refresh_after_an_expiry_is_retried_once_per_max_age` |
+| AMB-434 | curated registration is granted by the operator; a lease-only grant asking for it is refused before any I/O | `registration::curated_registration_needs_a_curated_grant`, `registration::checks_run_in_the_documented_order` |
+| AMB-433 | a grant's publishers pass the root `did:web` domain rule, one definition shared with `DidWebRoot` | `registration_policy::publisher_that_is_not_a_root_did_web_domain_is_refused` (`Example.com`, `example.com.`, `example.com:8443`, `10.0.0.1`, `0x7f.1`, `bücher.example`, `-a.example`, empty: `InvalidPublisher`; `xn--bcher-kva.example` accepted); trust `did_web_signer.rs` stays green on the moved check |
+| deployment | register once serving; refresh failures reported, not fatal; `lease_ttl ≥ 4 ×` refresh interval; operator removal by `EntryKey` | none (deployer guidance, §7) |
 | clock | injected `now`; storage never reads the clock | `registration::storage_source_never_reads_the_clock` |
-| contention | bounded retries, then `Contended` | `registration::contention_beyond_the_attempt_bound_is_reported` (a store double that always fails `Matches`) |
+| contention | bounded retries, then `Contended` | `registration::contention_beyond_the_attempt_bound_is_reported` (a store double that always fails `Matches`), `registration::store_contention_is_reported_as_contended` (a store double that returns `StoreError::Contended`), `dynamodb::conflicts_on_every_attempt_are_contended` |
+| lease bound | no stored expiry past year 9999; no panic on overflow | `registration_policy::lease_ttl_past_year_9999_is_refused`, `registration::lease_ending_past_year_9999_is_refused_before_any_io`, `provenance::provenance_that_would_not_read_back_is_refused`, `parity::provenance_that_would_not_read_back_is_refused` |
+| registrar ownership | the `Registrar` owns its store and verifier | the `Registrar` doc example (an `Arc<dyn CatalogStore>`); every `registration.rs` and `parity` registrar is built from `Arc`s |
 
 New ids, block AMB-420 to AMB-439:
 
@@ -300,17 +385,23 @@ New ids, block AMB-420 to AMB-439:
 - AMB-421: three placements were weighed. Inside the record bytes would change what `parse_entry` reads and what assembly serves. Beside the bytes and outside the `Etag` leaves a race: a lease refreshed with unchanged content keeps its `Etag`, so a stale reader's `Matches` overwrites a refreshed lease. Beside the bytes and inside the `Etag` keeps served bytes and Trust Manifest payloads unchanged and makes `Matches` cover writer and expiry. Mode exclusion must also hold for `Condition::Any` writers, which have no read to compare, so it is backend guarantee 8; it needs one more predicate in each backend's existing conditional step.
 - AMB-422: #catalog-projection defines a publisher-authorized identifier as one "assigned by the artifact publisher or its authorized delegate" and forbids inference from URL or `publisher`. An operator's grant is an explicit, out-of-band configuration of who is a delegate, not an inference. It is weaker than a signature, so the signature requirement is available per grant.
 - AMB-423: rule 3 requires a non-publisher, non-delegate operator to use non-`urn:air` identifiers. A prefix is the operator's own namespace, so it must not reach into `urn:air`. ADR-004 compares identifiers exactly, but some consumers may treat the URN scheme and NID case-insensitively (RFC 8141), so `URN:AIR:` is refused too.
-- AMB-424: allowing another writer to take over an expired lease would let one identifier name a different writer's artifact without the operator acting, against "MUST NOT be reassigned". Keeping ownership until deletion leaves reassignment an explicit operator act (a store-credential delete).
+- AMB-424: allowing a writer the operator did not configure for an identifier to take over an expired lease would let that identifier name another artifact without the operator acting, against "MUST NOT be reassigned". Keeping ownership of a record until deletion leaves reassignment of that record an explicit operator act (a store-credential delete). The unit of ownership is the record key, not the identifier. #catalog-projection places authority over a publisher-authorized `urn:air` identifier with "the artifact publisher or its authorized delegate", and the grant is the operator's configuration of who is a delegate (AMB-422); two writers granted one publisher are both its delegates, so the spec gives neither a stronger claim to the identifier than the other, and keeping their versions of it consistent is the delegating publisher's duty. Per-identifier ownership (the writer stored on the version-kind guard and checked in the backends' atomic step) was weighed and not built: it is a new backend guarantee in four backends, nothing in the spec requires it, and an operator that wants one writer per identifier gets it by granting disjoint publishers and prefixes. The consequence is stated, not hidden: a co-granted writer can add a version under an identifier another writer registered, which the catalog serves once the first writer's lease lapses, and the first record fixes the identifier's version kind for both (M21).
 - AMB-425: a storage feature depending on the trust crate would put JWS, `did:web` and network dependencies into storage and break ADR-016's pin. A trait in storage implemented by the trust crate under its own feature keeps storage free of crypto, has no cycle, and gives the trust crate one per-entry procedure for both report and gate. Verifying on refresh costs one DID document fetch and, for `url` entries, one artifact fetch per refresh per instance; no cache is built (a cache would be a new control).
 - AMB-426: an entry gated by an earlier release can fail a rule added later. Failing the whole assembly for it would take every other entry offline; omitting and reporting it keeps the rest served and visible. A cross-entry conflict has no spec-defined loser, so assembly still refuses it.
 - AMB-427: under this repository's no-compatibility rule, re-import replaces migration. Reading a missing provenance as `Curated` would be a permanent legacy path with no owner to check.
 - AMB-428: as ADR-015 AMB-331: checks that need nothing come first, so a refused request never reaches the store or the network, and each refusal has one deterministic reason. The store read precedes verification so that a mode or ownership refusal never causes a fetch.
 - AMB-429: §6.
+- AMB-430: with "the later of stored and `now + lease_ttl`", N instances passing distinct `now` values each compute a distinct later expiry, so up to N writes chain and any N above the 8-attempt bound can return `Contended`; whether they all return `Ok` depended on timing. Writing only when due makes equal-intent refreshes compute equal state, bounds commits by the spread of clocks rather than the number of instances, and cuts write cost to at most one per `slack` per lease. `slack = lease_ttl / 4` keeps a written lease at least three quarters of its length ahead of the writer's clock.
+- AMB-431: an in-place re-import of a live catalog id leaves a window where the served id holds both formats and fails assembly. A new id in the same table keeps the old function serving until the new one is deployed, needs no new table or grant (the grants cover the table, ADR-016 §7), and makes rollback a redeploy while the old items remain.
+- AMB-432: `max_age` alone serves an expired lease up to a whole `max_age` after it expires. Assembly already reads every expiry, so refreshing at the next one costs no extra read and no new control. Keeping the last good snapshot on a failed refresh (AMB-407) is kept, at the cost stated in §6.
+- AMB-434: M26's two modes differ in who ends an entry: a lease ends unless refreshed, a curated entry stays until removed and, under a signature-requiring grant, is never verified again (AMB-425). If any granted writer could pick `Curated`, a runtime writer could make its entry permanent and escape re-verification, and the operator could not prevent it. A grant therefore permits leases by default, and curated registration is an explicit operator setting. The check needs only the grant and the request, so it joins step 1 and runs before any I/O (AMB-428).
+- AMB-433: a grant naming a publisher that fails the domain rule can never be backed by a publisher signature (#the-did-web-publisher-profile), so it is a configuration error, refused at construction. Copying the check into storage would be a second definition, and depending on trust would break ADR-016's pin; the core crate is the one both already depend on.
 
 ## Consequences
 
 - Every entry write now states a mode and a writer, and every entry `Etag` changes value (it now covers provenance). Callers of `put_entry`, `get_entry`, `list_entries`, `import` and `assemble` migrate in the same slices; ADR-016's parity checks that compare `Etag` with record bytes are rewritten for entries.
-- Existing stores must be re-imported (§4.7). A deployed Lambda over an un-reimported DynamoDB table fails cold start, or keeps its last good snapshot, until then.
+- Existing stores must be re-imported, by the upgrade sequence of §4.7. A new-release function pointed at an un-reimported catalog id fails cold start, or keeps its last good snapshot; the previous release must never be pointed at a new-format id.
+- The curated writer id is permanent configuration (§4.5); losing it costs a delete and re-import.
 - SQL deployments gain two columns; DynamoDB writers need no new IAM action (`GetItem` and conditional `PutItem` are already granted).
 - A runtime registration costs one read and one conditional write, plus verification when required. Assembly costs are unchanged apart from a second validation pass when the first finds errors.
 - Expired leases keep their keys and version kinds until removed; a long-dead service's identifier cannot be registered in the other version kind until its record is deleted.
@@ -321,7 +412,9 @@ New ids, block AMB-420 to AMB-439:
 
 1. **Reaper.** Expired leases remain until removed (§6). Removing them automatically (a periodic sweep, or a DynamoDB TTL attribute) is a new control: it deletes records nobody asked to delete. Without it, nothing breaks today: expired leases are omitted from every assembly and reported. The sentence to approve: "Add a reaper that deletes lease records expired for longer than a configured grace period."
 2. **Registration endpoint.** The library has no transport. A deployer builds the authenticated channel in front of the `Registrar` (§2). Shipping one (an HTTP handler in the Lambda crate, say) is a new feature and needs its own approval.
-3. **`max_age` check.** Whether the Lambda should know `lease_ttl` and refuse a `max_age` that is too long (§6, AMB-429). Nothing breaks without it when the documented rule is followed.
+3. **CLI store command.** Approved (M27) and specified in §8.
+
+The earlier question of a `max_age` check is withdrawn: with §6's snapshot rule, `max_age` no longer bounds how long an expired lease is served.
 
 ## Slices
 
@@ -329,17 +422,18 @@ Each slice is ADR updates, then tests from this ADR, then code, then gates, then
 
 | Slice | Content | Updates |
 |---|---|---|
-| R1 | `WriterId`, `Provenance`, `ModeKind`, `Etag::of_entry`, `StoredEntry`; `put_entry` takes a provenance; guarantee 8 in all four backends with the schema changes of §4.6 and the earlier-table probe; `write_owned`; `import` takes a writer and records `Curated`; `ServedCatalog::from_document` passes its constant; parity checks for provenance, mode exclusion and racing modes | ADR-016 (trait, guarantee 8, §6 schemas, `Etag`, `import`), ADR-010 (`from_document`), revision logs |
-| R2 | `assemble(.., now)` with lease expiry, `Omission`, the `Invalid` second pass; `SnapshotCache` passes `now` and logs omissions; assembly, parity and lambda tests | ADR-016 §4, ADR-010, README (`max_age` rule) |
-| R3 | `RegistrationPolicy`, `WriterGrant`, `PolicyError`, `PublisherVerifier`, `Registrar::register` and `unregister` with the §3.2 order, lease refresh and `Contended`; `registration_policy.rs`, `registration.rs`, registration parity checks on every backend | this ADR's revision log if anything changes |
+| R1 | `WriterId`, `Provenance`, `ModeKind`, `Etag::of_entry`, `StoredEntry`; `put_entry` takes a provenance; guarantee 8 in all four backends with the schema changes of §4.6 and the earlier-table probe; `write_owned` (curated paths; its lease rule is exercised in R3); `import` takes a writer, records `Curated` and refuses another writer's records (`import_under_another_writer_id_is_refused`); `ServedCatalog::from_document` passes its constant; parity checks for provenance, mode exclusion and racing modes; `dynamodb::old_and_new_format_catalog_ids_share_a_table` | ADR-016 (trait, guarantee 8, §6 schemas, `Etag`, `import`), ADR-010 (`from_document`), README (the §4.7 upgrade sequence, the warning against the previous release, the permanent curated writer id and its recovery where `import` is documented), `CHANGELOG.md` opening with the §4.7 breaking line, revision logs |
+| R2 | `assemble(.., now)` with lease expiry, `Omission`, `next_expiry`, the `Invalid` second pass; `SnapshotCache` passes `now`, refreshes at the earlier of `max_age` and `next_expiry`, and logs omissions; assembly, parity and lambda tests including AMB-432's | ADR-016 §4 and §7 (freshness), ADR-010, README (the AMB-429 rule) |
+| R3 | `is_root_did_web_domain` moved to the core crate and called by `DidWebRoot::parse`; `RegistrationPolicy`, `WriterGrant` (domain check), `PolicyError`, `PublisherVerifier`, `Registrar::register` and `unregister` with the §3.2 order, the due-refresh rule of §4.3 and `Contended`; `registration_policy.rs`, `registration.rs`, registration parity checks on every backend including `many_instances_refreshing_one_lease_all_succeed` | ADR-004 (`is_root_did_web_domain`), ADR-012 (`DidWebRoot::parse` calls it), README (§7 deployment: role separation first, registration timing, refresh failures and `lease_ttl ≥ 4 ×` interval, removal snippet), this ADR's revision log if anything changes |
 | R4 | trust `verify_entry`; feature `registration` with `DidWebPublisherVerifier`; `publisher_verifier.rs`; `dependency_direction` pin | ADR-015 (`verify_entry`), ADR-011 (`dependency_direction`) |
+| R5 | `list_registrations`, `remove_registration`; `turul-ai-catalog store list` and `store remove` (§8); `operator.rs`, `store_commands.rs`, `dependency_direction` update | ADR-011 (the `store` command), README of the CLI and storage, this ADR's revision log |
 
 R1 and R2 change behaviour for every deployer (re-import, new `assemble` signature); R3 and R4 add API only.
 
 ## What this ADR does not do
 
 - No code, tests or `Cargo.toml` changes: they follow in R1 to R4.
-- No reaper, no TTL attribute, no registration endpoint or transport, no `max_age` check, no verification cache, no authentication of writers.
+- No reaper, no TTL attribute, no registration endpoint or transport, no `max_age` check, no verification cache, no authentication of writers, no cross-process check of snapshot age, no migration of earlier records.
 - No change to who may write a host: `put_host` and `import` stay operator paths.
 - No serving of omissions or provenance to clients: the served document is unchanged in shape.
 - No identifier assignment, rewriting or migration mechanism (#catalog-projection: "requires an explicit migration mechanism, which this specification does not define").
@@ -350,3 +444,19 @@ R1 and R2 change behaviour for every deployer (re-import, new `assemble` signatu
 | Date | Change |
 |---|---|
 | 2026-11-17 | Created under M26: `Registrar` over `CatalogStore` with `RegistrationPolicy` and `WriterGrant` (publisher and prefix allow-lists, refusal when neither, optional signature); opaque `WriterId`; `Provenance` (lease or curated, with writer) stored beside record bytes and covered by the entry `Etag`; backend guarantee 8 (mode exclusion) and schema changes for all four backends; idempotent lease refresh by read-then-`Matches`; `assemble` with injected `now` and an omission report; `PublisherVerifier` seam implemented by the trust crate under feature `registration` through a new `verify_entry`; re-import for earlier stores. AMB-420 to AMB-429 added. Reaper, endpoint and `max_age` check left to the maintainer. |
+| 2026-11-17 | Review, upgrading a live store: §4.7 states the supported sequence (import under a new `CatalogId` in the same table, deploy the function on that id, delete the old id's items), that the previous release must never be pointed at a new-format id, and that the R1 `CHANGELOG.md` entry opens with a breaking line for store holders; SQL uses a new database. AMB-431, pinned by `dynamodb::old_and_new_format_catalog_ids_share_a_table` (DynamoDB only: no other backend can hold both formats). |
+| 2026-11-17 | Review, refresh under many instances: a lease refresh writes only when the stored expiry is earlier than `now + lease_ttl − slack`, `slack = lease_ttl / 4`, otherwise returns `Ok` with the stored `Etag`; an update keeps the later-of rule. The claim that N instances all return `Ok`, which held only by timing, is replaced by the derivation in §4.3. AMB-430; `parity::concurrent_lease_refreshes_converge` and `registration::identical_refresh_writes_nothing` replaced by `parity::many_instances_refreshing_one_lease_all_succeed` (64 instances, distinct `now`) and `registration::refresh_is_a_no_op_until_due`. |
+| 2026-11-17 | Review, registration timing: new §7 states that a service registers once serving, never during init, that a refresh failing on an unreachable DID document or artifact is reported, not fatal, while the lease has time left, and recommends `lease_ttl ≥ 4 ×` the refresh interval. |
+| 2026-11-17 | Review, curated writer id: §4.5 states it is permanent configuration, that `import` refuses another writer's curated records, and the recovery (delete the catalog id's items with store credentials, re-import). Pinned by `import::import_under_another_writer_id_is_refused`; the README documents it with `import`. |
+| 2026-11-17 | Review, stale lease removal: §7 gives the operator's removal by `EntryKey` with `CatalogStore::delete_entry` conditioned on the read `Etag`, or the owner's `Registrar::unregister`. A CLI store command is open question 3, not built; the `max_age` check question is withdrawn (see the snapshot row). |
+| 2026-11-17 | Review, publisher grants: `WriterGrant::new` refuses a publisher that is not a lowercase ASCII root `did:web` domain, through `turul_ai_catalog::identity::is_root_did_web_domain`, moved from `DidWebRoot::parse`, which calls it. AMB-433, pinned by `registration_policy::publisher_that_is_not_a_root_did_web_domain_is_refused`; ADR-004 and ADR-012 change in R3. |
+| 2026-11-17 | Review, deployer guidance: §7 opens with "authority holds only if no registering service's role can write the table; the registrar runs under its own role". |
+| 2026-11-17 | Review, snapshot freshness: `Assembled` gains `next_expiry` from data assembly already reads; `SnapshotCache` refreshes at the earlier of `max_age` and `next_expiry`, so an expired lease is not served past its expiry (except while a refresh fails, AMB-407). In-process only; no cross-process check. AMB-432 and AMB-429 restated; pinned by `assembly::next_expiry_is_the_earliest_served_lease_expiry` and two `snapshot_refresh` tests. |
+| 2026-11-17 | Review, slices: every change above is assigned (R1: upgrade sequence, breaking line, writer-id permanence; R2: snapshot freshness; R3: refresh rule, domain check, deployment guidance and removal). |
+| 2026-11-17 | R2 landed: `SnapshotCache::new` takes the clock whose reading it passes to `assemble`, and `Omission` implements `Display` for the per-assembly log line. `entry_failing_the_current_gate_is_omitted_and_reported` writes its invalid row raw into a sqlite file, since no public constructor builds a record that fails the gate; it runs with feature `sqlite`. |
+| 2026-11-17 | R3 landed: `write_owned` takes the mode (`Curated`, or `Lease` with the policy's length), the optional verifier and `now`, and owns the refresh and update rules of §4.3, `import` passing `Curated`. The verifier of §3.2 step 6 runs once, immediately before the first put that would commit; a refresh that is not due, or a curated record with equal bytes, writes nothing and verifies nothing, since nothing is claimed or extended. Retries do not verify again. `parity::many_instances_refreshing_one_lease_all_succeed` takes `Arc<dyn CatalogStore>` and wraps it in a counting store. |
+| 2026-11-17 | R4 landed: trust `verify_entry` and `verify_entry_resolved` (the per-entry procedure, DID documents injected, so acceptance is testable without the network), feature `registration` with `DidWebPublisherVerifier::new(policy)` and `publisher_verdict(&EntryReport)`, which the verifier applies to `verify_entry` on a blocking thread; the feature is in CI and docs.rs metadata; `dependency_direction` pins the feature's dependency set. `PublisherVerifier` and `VerifierRefusal` were already in storage from R3. |
+| 2026-11-17 | Operator store command (M27): new §8 specifies `turul-ai-catalog store list` and `store remove`, backend by flag or the Lambda's environment variables, exit codes 0 and 2, and the storage owners `list_registrations` and `remove_registration`; open question 3 is answered and §7 points to it. Slice R5. |
+| 2026-11-17 | Review, curated mode is granted: `WriterGrant` gains `curated`, false from `WriterGrant::new` and set by `with_curated`; §3.2 step 1 refuses a `Curated` request under a lease-only grant with `RegistrationError::CuratedNotGranted` before any I/O. Before this, every granted writer could pick `Curated`, making its entry permanent and, under a signature-requiring grant, never re-verified. §3.1, §3.2, §4.5 and §5 updated. AMB-434, pinned by `registration::curated_registration_needs_a_curated_grant` and a step-1 case in `registration::checks_run_in_the_documented_order`. |
+| 2026-11-17 | Review, ownership unit: ownership stays per record key. #catalog-projection gives authority over a publisher-authorized `urn:air` identifier to "the artifact publisher or its authorized delegate", and a grant configures delegates (AMB-422), so writers granted one publisher share its identifiers' versions and version kind and cannot overwrite or remove each other's records. §3.1 and §3.3 and AMB-424 now say so plainly; per-identifier ownership on the guard record was weighed and not built (a new backend guarantee the spec does not require; disjoint grants give one writer per identifier). Pinned by `registration::co_granted_writers_share_an_identifier_but_not_its_records`. |
+| 2026-11-17 | Registration review. Lease bound: `RegistrationPolicy::new` refuses `PolicyError::LeaseTtlOutOfRange` for a length whose lease from the Unix epoch ends past year 9999; `write_owned` computes the expiry with checked addition and returns `RegistrationError::ExpiryOutOfRange` before any I/O instead of panicking; `Provenance::to_bytes` and `Etag::of_entry` return `Result` and refuse a provenance whose bytes would not read back, and every backend's put refuses it with `CorruptProvenance`. One canonical form: provenance bytes and the entry `Etag` preimage go through `Provenance::to_json`, `CatalogEntry::to_json` and `Json::to_canonical_vec`; the hand-built strings are deleted, and the bytes are unchanged (they were already JCS). `Registrar` owns `Arc<dyn CatalogStore>` and `Option<Arc<dyn PublisherVerifier>>` and has no lifetime. A store's own exhausted retries (`StoreError::Contended`) are `RegistrationError::Contended`. §5's dependency statement was right and the code was not: the trust `registration` feature took storage with its default features and `tokio` with `macros`; the root dependency on storage now has `default-features = false` (the Lambda asks for `in-memory`), the root `tokio` has `rt` only (`macros` is asked for where used), and `dependency_direction` pins both. |

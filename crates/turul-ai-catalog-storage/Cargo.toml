@@ -22,7 +22,7 @@ default = ["in-memory"]
 in-memory = []
 sqlite = ["dep:sqlx", "sqlx/sqlite"]
 postgres = ["dep:sqlx", "sqlx/postgres", "sqlx/tls-rustls"]
-dynamodb = ["dep:aws-sdk-dynamodb"]
+dynamodb = ["dep:aws-sdk-dynamodb", "dep:tokio"]
 
 [dependencies]
 turul-ai-catalog = { workspace = true }
@@ -30,7 +30,8 @@ async-trait = { workspace = true }
 sha2 = { workspace = true }
 sqlx = { workspace = true, optional = true }
 aws-sdk-dynamodb = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true, features = ["time"] }
 
 [dev-dependencies]
 futures = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["macros"] }

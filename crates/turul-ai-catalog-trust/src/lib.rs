@@ -8,6 +8,8 @@ pub mod header;
 pub mod identity;
 pub mod object;
 pub mod payload;
+#[cfg(feature = "registration")]
+pub mod registration;
 pub mod report;
 pub mod sign;
 
@@ -24,9 +26,12 @@ pub use header::{
 pub use identity::DidWebRoot;
 pub use object::SignedObject;
 pub use payload::{PayloadError, catalog_payload, manifest_payload};
+#[cfg(feature = "registration")]
+pub use registration::{DidWebPublisherVerifier, publisher_verdict};
 pub use report::{
     CatalogReport, Coverage, CoverageGap, DidDocuments, Endorsement, EntryReport, ManifestReport,
     Selection, SignatureOutcome, TrustReport, catalog_endorsed, entry_release_coverage,
-    publisher_authorized, select_current, verify, verify_resolved,
+    publisher_authorized, select_current, verify, verify_entry, verify_entry_resolved,
+    verify_resolved,
 };
 pub use sign::{SignError, SignerParams, SigningKey, sign_catalog, sign_manifest};

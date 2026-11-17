@@ -32,7 +32,7 @@ AI Catalog documents.
     {
       "identifier": "urn:air:example.com:mcp:weather",
       "type": "application/mcp-server-card+json",
-      "url": "https://mcp.example.com/.well-known/mcp/server-card.json"
+      "url": "https://mcp.example.com/mcp/server-card"
     }
   ]
 }
@@ -65,7 +65,7 @@ turul-ai-catalog init --file ai-catalog.json \
 turul-ai-catalog add --file ai-catalog.json \
   --identifier urn:air:example.com:mcp:weather \
   --type application/mcp-server-card+json \
-  --url https://mcp.example.com/.well-known/mcp/server-card.json
+  --url https://mcp.example.com/mcp/server-card
 turul-ai-catalog validate --file ai-catalog.json   # exit 0 valid, 1 invalid
 turul-ai-catalog list --file ai-catalog.json
 turul-ai-catalog view --well-known example.com     # browse a live catalog in the terminal
@@ -96,7 +96,7 @@ let agent = CatalogEntry::new(
 let server = CatalogEntry::new(
     EntryIdentifier::new("urn:air:example.com:mcp:weather"),
     ArtifactType::MCP_SERVER_CARD,
-    ArtifactSource::Url("https://mcp.example.com/.well-known/mcp/server-card.json".into()),
+    ArtifactSource::Url("https://mcp.example.com/mcp/server-card".into()),
 );
 
 let mut catalog = AiCatalog::new(vec![agent, server]);

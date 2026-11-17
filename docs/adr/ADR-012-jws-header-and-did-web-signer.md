@@ -18,11 +18,10 @@ Spec anchors implemented: #signature-object (`jws` stored form), #signed-payload
 
 ### 1. Identity shapes (`identity` module)
 
-- `DidWebRoot::parse(&str) -> Option<DidWebRoot>` is the one root-`did:web` rule (AMB-77), used for `signer`, for `TrustPolicy::operators` (ADR-015) and for the publisher component. Accepts exactly when:
-  1. the value starts with `did:web:` (exact, case-sensitive);
-  2. the rest (the domain) is 1 to 253 bytes;
-  3. split on `.`, every label is 1 to 63 bytes of `[a-z0-9-]`, not starting or ending with `-` (so uppercase, `%3A` ports, a further `:` path, `/`, `?`, `#`, `[`, any non-ASCII U-label, an empty label and a trailing `.` are refused);
-  4. the last label is not all digits and is not `0x` followed only by `[0-9a-f]` (the WHATWG host parser's "ends in a number" test, so `192.0.2.1`, `2130706433`, `127.1` and `0x7f.0.0.1` are IP spellings and refused; IPv6 needs `[`, refused by 3).
+- `DidWebRoot::parse(&str) -> Option<DidWebRoot>` is the one root-`did:web` DID parser (AMB-77), used for `signer` and for `TrustPolicy::operators` (ADR-015). It accepts exactly when the value starts with `did:web:` (exact, case-sensitive) and the rest satisfies `turul_ai_catalog::identity::is_root_did_web_domain` (ADR-004), the one domain rule, which the publisher component also uses (ADR-017). That rule accepts exactly when:
+  1. the domain is 1 to 253 bytes;
+  2. split on `.`, every label is 1 to 63 bytes of `[a-z0-9-]`, not starting or ending with `-` (so uppercase, `%3A` ports, a further `:` path, `/`, `?`, `#`, `[`, any non-ASCII U-label, an empty label and a trailing `.` are refused);
+  3. the last label is not all digits and is not `0x` followed only by `[0-9a-f]` (the WHATWG host parser's "ends in a number" test, so `192.0.2.1`, `2130706433`, `127.1` and `0x7f.0.0.1` are IP spellings and refused; IPv6 needs `[`, refused by 2).
   `xn--` A-labels are accepted as LDH text and are not IDNA-validated (M6 for the format crate; the trust crate adds no IDNA dependency either, §0b names none). Accessors: `as_str()` (the whole DID), `domain()`.
 - `UrnAir::parse(&str) -> Option<UrnAir>` is the one `urn:air` parser (AMB-78): exact, case-sensitive prefix `urn:air:`, then at least three `:`-separated non-empty components: `publisher()` (first), `name()` (last), `namespace()` (all between, `:` kept). The publisher is not checked here: one that fails `DidWebRoot::parse("did:web:" + publisher)` still parses and is never authorised (ADR-015).
 
@@ -65,7 +64,7 @@ The producer MUSTs (#the-did-web-signer-profile, #jws-algorithm-and-key-requirem
 
 | Key or artifact | Owner | Entrypoint |
 |---|---|---|
-| Root `did:web` identity (signer, operator, publisher DID) | `identity::DidWebRoot::parse` | itself; ADR-015 `verify_signature`, `publisher_authorized`, `TrustPolicy::operators` |
+| Root `did:web` identity (signer, operator, publisher DID) | `identity::DidWebRoot::parse`, whose domain rule is `turul_ai_catalog::identity::is_root_did_web_domain` | itself; ADR-015 `verify_signature`, `publisher_authorized`, `TrustPolicy::operators` |
 | `urn:air` components | `turul_ai_catalog::identity::UrnAir::parse` (moved to the core crate, M24; owned by ADR-004) | ADR-015 `publisher_authorized` |
 | Header policy | `header::policy(SignedObject)` | `header::inspect`; ADR-015 `verify_signature` (`verify_detached`) |
 | Header check (structure, `alg`, `typ`, `b64`, `crit`, forbidden members) | `turul_jwt_validator::detached::inspect_detached` through `header::policy` | `header::inspect` |
@@ -147,3 +146,4 @@ Agreements: `typ`, `alg` ES256 only, `none`, the four forbidden members and the 
 | 2026-11-17 | `Kid::parse(&str, &DidWebRoot) -> Option<Kid>` added (T3): the one constructor of a `Kid`, applying `kid_matches_signer`; `header::inspect` builds its `Kid` through it. |
 | 2026-11-17 | The ADR-013 signer now builds its `kid` through `Kid::parse` and takes its signer as `DidWebRoot`, so the owner-table row "`kid` form … ADR-013 signer" holds: `sign`'s second `kid` rule (non-empty signer without `#`, then `is_fragment`) is deleted. |
 | 2026-11-17 | M24: `UrnAir` moved to `turul_ai_catalog::identity` (ADR-004) so consumers that only build and validate catalogs can parse `urn:air` without the trust crate. The trust crate imports it from core and does not re-export it. The grammar and its tests (`urn_air.rs`, now in the core crate) are unchanged. |
+| 2026-11-17 | ADR-017 R3: the domain rule of `DidWebRoot::parse` moved to `turul_ai_catalog::identity::is_root_did_web_domain` (ADR-004), which `parse` calls after stripping `did:web:`; behaviour unchanged, `did_web_signer.rs` stays green. Storage's `WriterGrant::new` calls the same function, so there is one definition. |

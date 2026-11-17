@@ -117,6 +117,45 @@ impl EntryKey {
 
 const URN_AIR_PREFIX: &str = "urn:air:";
 
+/// Whether `domain` satisfies the root `did:web` domain restrictions: lowercase ASCII LDH labels,
+/// no port, IP address spelling, trailing root dot or Unicode U-label
+/// ([#the-did-web-signer-profile](https://ai-catalog.io/specification/#the-did-web-signer-profile)).
+/// `xn--` A-labels pass as LDH text and are not IDNA-validated.
+///
+/// # Examples
+///
+/// ```
+/// use turul_ai_catalog::identity::is_root_did_web_domain;
+///
+/// assert!(is_root_did_web_domain("example.com"));
+/// assert!(!is_root_did_web_domain("Example.com"));
+/// assert!(!is_root_did_web_domain("example.com:8443"));
+/// assert!(!is_root_did_web_domain("10.0.0.1"));
+/// ```
+pub fn is_root_did_web_domain(domain: &str) -> bool {
+    if domain.is_empty() || domain.len() > 253 {
+        return false;
+    }
+    let mut last = "";
+    for label in domain.split('.') {
+        let b = label.as_bytes();
+        let edge_ok = b.first().is_some_and(|c| *c != b'-') && b.last() != Some(&b'-');
+        if b.len() > 63
+            || !edge_ok
+            || !b
+                .iter()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-')
+        {
+            return false;
+        }
+        last = label;
+    }
+    // The WHATWG host parser's "ends in a number": such a host is an IPv4 spelling.
+    let hex = last.strip_prefix("0x");
+    !(last.bytes().all(|c| c.is_ascii_digit())
+        || hex.is_some_and(|h| h.bytes().all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f'))))
+}
+
 /// A `urn:air` identifier split into publisher, namespace and name. Parsing is grammar only:
 /// [`validate`](crate::validate::validate) does not require entry identifiers to be `urn:air`, and
 /// the publisher is not checked against any domain rule here.

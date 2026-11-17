@@ -1,9 +1,11 @@
 //! A carried document is served through the same import and assembly gate as the store path.
 
+use std::time::SystemTime;
+
 use futures::executor::block_on;
 use turul_ai_catalog::parse::parse;
 use turul_ai_catalog_lambda::{ColdStartError, ServedCatalog, handle};
-use turul_ai_catalog_storage::{AssembleError, CatalogId, InMemoryCatalogStore, import};
+use turul_ai_catalog_storage::{AssembleError, CatalogId, InMemoryCatalogStore, WriterId, import};
 
 mod support;
 use support::{body_bytes, request};
@@ -17,8 +19,15 @@ fn serves_the_same_bytes_as_importing_then_assembling() {
     let served = block_on(ServedCatalog::from_document(&document)).expect("serves");
     let store = InMemoryCatalogStore::new();
     let id = CatalogId::new("other").expect("id");
-    block_on(import(&store, &id, &document)).expect("imports");
-    let direct = block_on(ServedCatalog::assemble(&store, &id)).expect("assembles");
+    block_on(import(
+        &store,
+        &id,
+        &document,
+        &WriterId::new("operator").unwrap(),
+    ))
+    .expect("imports");
+    let direct =
+        block_on(ServedCatalog::assemble(&store, &id, SystemTime::now())).expect("assembles");
     let a = body_bytes(&handle(&served, &request("GET", WELL_KNOWN_PATH)));
     let b = body_bytes(&handle(&direct, &request("GET", WELL_KNOWN_PATH)));
     assert_eq!(a, b);

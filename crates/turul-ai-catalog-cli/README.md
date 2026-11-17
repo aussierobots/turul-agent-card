@@ -30,6 +30,15 @@ turul-ai-catalog remove --file catalog.json --identifier ID [--version V]
 
 `validate` and `list` write their output, diagnostics included, to stdout; `--format json` writes the canonical JSON of the loaded tree (filtered, for `list`). Load warnings go to stderr. Producer commands print their diagnostics to stderr.
 
+## Operating a store
+
+```sh
+turul-ai-catalog store list   BACKEND --catalog-id ID
+turul-ai-catalog store remove BACKEND --catalog-id ID --identifier ID [--version V]
+```
+
+`BACKEND` is one of `--sqlite PATH`, `--postgres URL` (feature `postgres`) or `--table NAME` (DynamoDB, feature `dynamodb`). Each reads an environment variable when its flag is absent: `TURUL_AI_CATALOG_SQLITE`, `TURUL_AI_CATALOG_POSTGRES_URL` and `TURUL_AI_CATALOG_TABLE`, and `--catalog-id` reads `TURUL_AI_CATALOG_ID`, as the Lambda does. DynamoDB credentials come from the AWS default chain. `list` prints one line per entry: identifier, version, mode, writer and whether it is live, expired or never expires. `remove` deletes the entry with exactly that identifier and version (no `--version` names the unversioned entry) and refuses when the entry changed since it was read. Both exit 0 on success and 2 on any failure, including `remove` matching no entry.
+
 ## Exit codes
 
 | Code | Meaning |

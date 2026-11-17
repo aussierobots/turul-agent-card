@@ -2,6 +2,8 @@
 
 mod support;
 
+use std::time::SystemTime;
+
 use futures::executor::block_on;
 use support::{body_bytes, catalog_id, request, served_from, store_with};
 use turul_ai_catalog::canonical::to_canonical_vec;
@@ -38,9 +40,13 @@ fn content_type(r: &lambda_http::Response<lambda_http::Body>) -> Vec<String> {
 
 /// What `assemble` yields for the records of `document`.
 fn assembled_bytes(document: &str) -> Vec<u8> {
-    block_on(assemble(&store_with(document), &catalog_id()))
-        .expect("assembles")
-        .bytes
+    block_on(assemble(
+        &store_with(document),
+        &catalog_id(),
+        SystemTime::now(),
+    ))
+    .expect("assembles")
+    .bytes
 }
 
 // #well-known-uri
