@@ -1,6 +1,6 @@
-# Draft spec issue: may a consumer fetch artifacts for display on an explicit user request?
+# Spec issue: may a consumer fetch artifacts for display on an explicit user request?
 
-Draft only; nothing here has been posted. Target: `github.com/Agent-Card/ai-catalog`, against `specification/ai-catalog.md` revision 2026-11-10.
+Filed 2026-11-18 as https://github.com/Agent-Card/ai-catalog/issues/140. Target: `github.com/Agent-Card/ai-catalog`, against `specification/ai-catalog.md` revision 2026-11-10.
 
 ---
 
