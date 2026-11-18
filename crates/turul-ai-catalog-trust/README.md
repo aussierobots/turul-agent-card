@@ -91,6 +91,8 @@ For a whole resolved tree, `verify` fetches each signer's DID document once and 
 | `accept` | Acceptance of one signature under a `TrustPolicy`. |
 | `digest` | Artifact digests and integrity checks. |
 | `report` | Entry coverage, publisher authority, endorsement, the trust report and `verify_entry`. |
+| `endorse` | `endorse_entry` and `endorse_catalog`: digest and publisher manifest per entry. |
+| `parameter_store` | Feature `ssm`: the signing key held in an SSM Parameter Store SecureString. |
 | `registration` | Feature `registration`: the publisher verifier for runtime registration. |
 | `identity` | `did:web` root and `urn:air` identifier shapes. |
 
@@ -100,6 +102,8 @@ For a whole resolved tree, `verify` fetches each signer's DID document once and 
   [`turul-ai-catalog-storage`](../turul-ai-catalog-storage). It accepts an entry only when its
   `urn:air` publisher signed a trust manifest that covers it. Adds `turul-ai-catalog-storage`
   (without default features, so without a backend), `async-trait` and `tokio` (`rt`).
+- `ssm` (off by default): `ParameterKeyStore`, which creates the signing key as a SecureString
+  (never overwriting one) and loads it in process. Adds `aws-sdk-ssm`.
 
 ## Licence
 

@@ -109,6 +109,71 @@ pub fn compute(algorithm: &str, bytes: &[u8]) -> Result<String, IntegrityError> 
     Ok(format!("{name}:{hex}"))
 }
 
+fn artifact_bytes(
+    entry: &CatalogEntry,
+    base: Option<&str>,
+    policy: &FetchPolicy,
+) -> Result<Vec<u8>, IntegrityError> {
+    match &entry.source {
+        ArtifactSource::Data(json) => {
+            json.to_canonical_vec()
+                .map_err(|e| match PayloadError::from(e) {
+                    PayloadError::NotIJson { pointer } => IntegrityError::NotIJson { pointer },
+                })
+        }
+        ArtifactSource::Url(reference) => {
+            let url =
+                resolve_reference(base, reference).map_err(|_| IntegrityError::Unresolvable)?;
+            if url.starts_with("data:") {
+                return Err(IntegrityError::Unsupported(Unsupported::DataUri));
+            }
+            let fetched = fetch(&url, None, policy).map_err(IntegrityError::Fetch)?;
+            if fetched.status != 200 {
+                return Err(IntegrityError::Status(fetched.status));
+            }
+            Ok(fetched.body)
+        }
+    }
+}
+
+/// Returns `sha256:<hex>` of the entry's artifact bytes: its JCS `data`, or the body of `url`
+/// (resolved against `base`, the containing catalog's fetched URL) with status 200. The bytes
+/// are retrieved exactly as [`verify_artifact`] retrieves them, so a producer and a verifier
+/// hash the same representation.
+///
+/// Blocking: a `url` entry performs an HTTP request. Call through
+/// `tokio::task::spawn_blocking` from async code.
+///
+/// # Errors
+///
+/// The errors of [`verify_artifact`] other than `DigestMissing`, `DigestInvalid` and `Mismatch`.
+///
+/// # Examples
+///
+/// ```
+/// use turul_ai_catalog::identity::{ArtifactType, EntryIdentifier};
+/// use turul_ai_catalog::json::read;
+/// use turul_ai_catalog::model::{ArtifactSource, CatalogEntry};
+/// use turul_ai_catalog_client::FetchPolicy;
+/// use turul_ai_catalog_trust::{artifact_digest, compute};
+///
+/// let entry = CatalogEntry::new(
+///     EntryIdentifier::new("urn:air:example.com:a2a:research"),
+///     ArtifactType::A2A_AGENT_CARD,
+///     ArtifactSource::Data(read(br#"{"name":"research"}"#)?),
+/// );
+/// let digest = artifact_digest(&entry, None, &FetchPolicy::default())?;
+/// assert_eq!(digest, compute("sha256", br#"{"name":"research"}"#)?);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+pub fn artifact_digest(
+    entry: &CatalogEntry,
+    base: Option<&str>,
+    policy: &FetchPolicy,
+) -> Result<String, IntegrityError> {
+    compute("sha256", &artifact_bytes(entry, base, policy)?)
+}
+
 /// Compares `entry.digest` with the digest of the entry's artifact bytes: its JCS `data`, or
 /// the body retrieved from `url` (resolved against `base`, the containing catalog's fetched
 /// URL). Only `entry.digest` is read.
@@ -156,26 +221,7 @@ pub fn verify_artifact(
         .as_deref()
         .ok_or(IntegrityError::DigestMissing)?;
     let digest = DigestValue::parse(text).map_err(|_| IntegrityError::DigestInvalid)?;
-    let bytes = match &entry.source {
-        ArtifactSource::Data(json) => {
-            json.to_canonical_vec()
-                .map_err(|e| match PayloadError::from(e) {
-                    PayloadError::NotIJson { pointer } => IntegrityError::NotIJson { pointer },
-                })?
-        }
-        ArtifactSource::Url(reference) => {
-            let url =
-                resolve_reference(base, reference).map_err(|_| IntegrityError::Unresolvable)?;
-            if url.starts_with("data:") {
-                return Err(IntegrityError::Unsupported(Unsupported::DataUri));
-            }
-            let fetched = fetch(&url, None, policy).map_err(IntegrityError::Fetch)?;
-            if fetched.status != 200 {
-                return Err(IntegrityError::Status(fetched.status));
-            }
-            fetched.body
-        }
-    };
+    let bytes = artifact_bytes(entry, base, policy)?;
     let name = text.split_once(':').map_or(text, |(n, _)| n);
     let actual = compute(name, &bytes)?;
     let expected = format!("{}:{}", name.to_ascii_lowercase(), digest.hex());

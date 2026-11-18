@@ -168,6 +168,20 @@ pub struct EntryReport<'a> {
     pub manifests: Vec<ManifestReport<'a>>,
 }
 
+impl EntryReport<'_> {
+    /// Returns the strongest endorsement any manifest of the entry carries.
+    pub fn endorsement(&self) -> Endorsement {
+        let all: Vec<Endorsement> = self.manifests.iter().map(|m| m.endorsement()).collect();
+        if all.contains(&Endorsement::Publisher) {
+            Endorsement::Publisher
+        } else if all.contains(&Endorsement::Contributor) {
+            Endorsement::Contributor
+        } else {
+            Endorsement::None
+        }
+    }
+}
+
 /// One catalog node's outcomes.
 #[derive(Debug)]
 #[non_exhaustive]

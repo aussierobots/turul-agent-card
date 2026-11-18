@@ -19,6 +19,7 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
+ssm = ["dep:aws-sdk-ssm"]
 registration = ["dep:turul-ai-catalog-storage", "dep:async-trait", "dep:tokio"]
 
 [dependencies]
@@ -29,6 +30,9 @@ turul-jwt-validator.workspace = true
 turul-ai-catalog-storage = { workspace = true, optional = true }
 async-trait = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
+p256.workspace = true
+rand_core.workspace = true
+aws-sdk-ssm = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros"] }

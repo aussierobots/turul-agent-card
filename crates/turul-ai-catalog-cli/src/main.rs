@@ -1,6 +1,7 @@
 #![doc = include_str!("../README.md")]
 
 mod store;
+mod trust;
 
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -98,6 +99,15 @@ enum Command {
     /// List, remove, import or purge the entries of a catalog held in a store.
     #[command(subcommand)]
     Store(store::StoreCommand),
+    /// Generate the publisher signing key or print its DID document.
+    #[cfg(feature = "ssm")]
+    #[command(subcommand)]
+    Key(trust::KeyCommand),
+    /// Endorse each entry of a catalog as its publisher, or sign the whole catalog.
+    #[cfg(feature = "ssm")]
+    Sign(trust::SignArgs),
+    /// Verify the signatures and artifact digests of a catalog tree.
+    Verify(trust::VerifyArgs),
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -177,6 +187,11 @@ fn main() -> ExitCode {
 fn run(command: Command) -> u8 {
     match command {
         Command::Store(command) => store::run(command),
+        #[cfg(feature = "ssm")]
+        Command::Key(command) => trust::key(command),
+        #[cfg(feature = "ssm")]
+        Command::Sign(args) => trust::sign(args),
+        Command::Verify(args) => trust::verify_command(args),
         Command::Validate { format, source } => {
             read_only(source, format, None, |tree, label, out| {
                 validate_text(tree, label, out)
@@ -375,14 +390,7 @@ fn validate_text(tree: &ResolvedCatalog, label: &str, out: &mut dyn Write) -> io
                 validate_text(c, child_label, out)?;
             }
             Child::Skipped { url, reason } => {
-                let reason = match reason {
-                    turul_ai_catalog_client::SkipReason::Budget => "budget".to_string(),
-                    turul_ai_catalog_client::SkipReason::Depth => "depth".to_string(),
-                    turul_ai_catalog_client::SkipReason::Cycle => "cycle".to_string(),
-                    turul_ai_catalog_client::SkipReason::Unresolvable => "unresolvable".to_string(),
-                    turul_ai_catalog_client::SkipReason::Fetch(e) => format!("fetch: {e}"),
-                    _ => "skipped".to_string(),
-                };
+                let reason = skip_reason(reason);
                 writeln!(
                     out,
                     "  skipped {} {}",
@@ -393,6 +401,18 @@ fn validate_text(tree: &ResolvedCatalog, label: &str, out: &mut dyn Write) -> io
         }
     }
     Ok(())
+}
+
+/// The text of why a nested catalog was not loaded.
+pub(crate) fn skip_reason(reason: &turul_ai_catalog_client::SkipReason) -> String {
+    match reason {
+        turul_ai_catalog_client::SkipReason::Budget => "budget".to_string(),
+        turul_ai_catalog_client::SkipReason::Depth => "depth".to_string(),
+        turul_ai_catalog_client::SkipReason::Cycle => "cycle".to_string(),
+        turul_ai_catalog_client::SkipReason::Unresolvable => "unresolvable".to_string(),
+        turul_ai_catalog_client::SkipReason::Fetch(e) => format!("fetch: {e}"),
+        _ => "skipped".to_string(),
+    }
 }
 
 /// Writes one line per entry row of every catalog node: name, identifier, type, version and the

@@ -41,6 +41,17 @@ turul-ai-catalog store purge  BACKEND --catalog-id ID [--yes]
 
 `BACKEND` is one of `--sqlite PATH`, `--postgres URL` (feature `postgres`) or `--table NAME` (DynamoDB, feature `dynamodb`). Each reads an environment variable when its flag is absent: `TURUL_AI_CATALOG_SQLITE`, `TURUL_AI_CATALOG_POSTGRES_URL` and `TURUL_AI_CATALOG_TABLE`, and `--catalog-id` reads `TURUL_AI_CATALOG_ID`, as the Lambda does. DynamoDB credentials come from the AWS default chain. `list` prints one line per entry: identifier, version, mode, writer and whether it is live, expired or never expires. `remove` deletes the entry with exactly that identifier and version (no `--version` names the unversioned entry) and refuses when the entry changed since it was read. `import` stores the entries of a catalog file as curated by the permanent writer id `--writer`, following no nested catalog; with `--replace` the catalog id then holds exactly the file (a file without a host keeps the stored host), and it refuses, writing nothing, while the id holds a live lease. `purge` only counts the id's items by kind unless given `--yes`, and refuses the id equal to `TURUL_AI_CATALOG_ID`, so the id to purge must be given as `--catalog-id`; `--yes` also refuses while `TURUL_AI_CATALOG_ID` is unset, so set it to the id the function serves. Each exits 0 on success, 1 when `import` refuses a file with an error diagnostic, and 2 on any other failure, including `remove` matching no entry.
 
+## Publisher signing
+
+```text
+turul-ai-catalog key generate     --ssm-parameter NAME --did DID --fragment F
+turul-ai-catalog key did-document --ssm-parameter NAME --did DID --fragment F
+turul-ai-catalog sign SOURCE --ssm-parameter NAME --did DID --fragment F --issued-at T [--expires-at T] [--catalog]
+turul-ai-catalog verify SOURCE [--require-publisher]
+```
+
+`key` and `sign` need the feature `ssm`; `verify` is always built. The P-256 key is held as a `SecureString` in AWS Systems Manager Parameter Store (credentials from the AWS default chain) and is never printed or written to a file. `key generate` creates the parameter, refuses (exit 2) when it exists, and prints the DID document to serve at `https://<domain>/.well-known/did.json`; `key did-document` prints it again. `sign` sets each authorised entry's `digest` from its artifact and signs its publisher Trust Manifest, keeping a manifest whose release is unchanged, and prints the catalog; with `--catalog` it signs the whole catalog as it is. It follows no nested catalog and exits 0 when written, 1 when the loaded document has an error diagnostic, 2 on any other failure. `verify` prints one line per catalog and entry and exits 1 when a signature is rejected, a relied-on artifact fails its digest, a nested catalog was not loaded, a catalog has an error diagnostic, or, with `--require-publisher`, an entry has no endorsement by its publisher. Every artifact release changes that entry's digest, so run `sign` again before publishing the catalog. `sign --file` has no base URL, so relative `url` entries need `--url` or `--well-known`. `sign` removes a whole-catalog signature when it changes an entry; run `sign --catalog` afterwards. If `key generate` reports that the parameter exists after a network retry, `key did-document` prints the document of the key it holds.
+
 ## Exit codes
 
 | Code | Meaning |

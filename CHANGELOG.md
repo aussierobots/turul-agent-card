@@ -5,6 +5,31 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.0.26] - 2026-11-18
+
+### Added
+
+- Publisher signing tools in `turul-ai-catalog-trust` (see ADR-018), so a publisher reaches a Trusted Catalog without writing key, JWK, DID or digest code:
+  - `SigningKey::generate` (a fresh P-256 key) and `SigningKey::public_jwk` (the public key only).
+  - `did_document`: the `did:web` DID document that verification accepts for that key.
+  - `artifact_digest`: the `sha256:` digest of an entry's artifact, fetched the same way `verify_artifact` fetches it.
+  - `endorse_entry` and `endorse_catalog`: set each of the signer's entries' `digest` and sign its publisher Trust Manifest. A manifest whose release is unchanged, whose signature this key made and which has no expiry is kept byte for byte, so a re-run over unchanged artifacts changes nothing. A digest the artifact still matches is kept as written; a whole-catalog signature is removed when an entry changes.
+  - Feature `ssm`: `ParameterKeyStore` holds the key as an SSM Parameter Store SecureString, creating it once (never overwriting) and loading it in process.
+- `EntryReport::endorsement`: the strongest endorsement among an entry's manifests.
+- CLI: `turul-ai-catalog verify SOURCE [--require-publisher]` checks every signature and every relied-on artifact digest, and exits 1 on any rejection, a nested catalog not loaded or embedded as `data` (whose entries are not verified), or an invalid catalog. With the feature `ssm`: `key generate`, `key did-document` and `sign` (per-entry endorsement, or `--catalog` for a whole-catalog signature). The private key is never printed or written to a file.
+
+### Changed
+
+- The CLI depends on `turul-ai-catalog-trust`.
+
+### Compatibility
+
+- Every artifact release changes its entry's digest: run `sign` (or `endorse_catalog`) before publishing, or verification reports that entry's integrity as a mismatch.
+
+### Verification
+
+- Key generation, DID document acceptance, endorsement through to publisher endorsement, and the Parameter Store calls (against a local SSM stand-in) are tested with and without the `ssm` feature.
+
 ## [0.0.25] - 2026-11-18
 
 ### Changed

@@ -73,6 +73,8 @@ fn direct_dependencies_are_only_the_named_crates() {
     assert_eq!(
         names,
         [
+            "p256",
+            "rand_core",
             "sha2",
             "turul-ai-catalog",
             "turul-ai-catalog-client",

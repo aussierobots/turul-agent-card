@@ -2,8 +2,8 @@
 
 ## Current State
 
-- Seven crates, ADR-002 to ADR-016 in `docs/adr/`: `turul-ai-catalog` (format: `parse`, `validate`, `to_canonical_vec`), `-client` (`fetch`, `load`, `produce`), `-tui` (`render`, `run`), `-cli` (binary `turul-ai-catalog`), `-trust` (`sign_manifest`, `verify_signature`, `verify_resolved`), `-storage` (`CatalogStore`, `EntryRecord`, `assemble`, `import`), `-lambda` (`ServedCatalog::assemble`, `SnapshotCache`, `handle`).
-- Dependencies point at the core: `client` -> core; `tui` -> core, `client`; `cli` -> core, `client`, `tui`; `trust` -> core, `client`; `storage` -> core; `lambda` -> core, `storage`.
+- Seven crates, ADR-002 to ADR-018 in `docs/adr/`: `turul-ai-catalog` (format: `parse`, `validate`, `to_canonical_vec`), `-client` (`fetch`, `load`, `produce`), `-tui` (`render`, `run`), `-cli` (binary `turul-ai-catalog`), `-trust` (`sign_manifest`, `verify_signature`, `verify_resolved`, `endorse_catalog`, `did_document`), `-storage` (`CatalogStore`, `EntryRecord`, `assemble`, `import`), `-lambda` (`ServedCatalog::assemble`, `SnapshotCache`, `handle`).
+- Dependencies point at the core: `client` -> core; `tui` -> core, `client`; `cli` -> core, `client`, `tui`, `trust`, `storage`; `trust` -> core, `client` (and `storage` with feature `registration`); `storage` -> core; `lambda` -> core, `storage`.
 - Local server: `cargo run -p turul-ai-catalog-lambda --features local --bin turul-ai-catalog-serve -- --file ai-catalog.json --addr 127.0.0.1:8080`; Lambda: `cargo lambda watch -p turul-ai-catalog-lambda`.
 - Deferred features: `docs/plan/TODO.md`. Governance: CI, the `adr-review` agent and the `agent-card-slice` workflow.
 - Target: the [AI Catalog specification](https://ai-catalog.io) (Linux Foundation, Agent Card Working Group), `specVersion` `1.0`.

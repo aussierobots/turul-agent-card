@@ -22,14 +22,17 @@ doc = false
 [features]
 # Backends for `store`; SQLite is always built.
 postgres = ["turul-ai-catalog-storage/postgres"]
+ssm = ["turul-ai-catalog-trust/ssm", "dep:aws-config", "dep:aws-sdk-ssm"]
 dynamodb = ["dep:aws-config", "dep:aws-sdk-dynamodb", "turul-ai-catalog-storage/dynamodb"]
 
 [dependencies]
 turul-ai-catalog = { workspace = true }
 turul-ai-catalog-storage = { workspace = true, features = ["sqlite"] }
 turul-ai-catalog-client = { workspace = true }
+turul-ai-catalog-trust = { workspace = true }
 turul-ai-catalog-tui = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true }
 aws-config = { workspace = true, optional = true }
 aws-sdk-dynamodb = { workspace = true, optional = true }
+aws-sdk-ssm = { workspace = true, optional = true }

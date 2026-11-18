@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+pub mod fake_ssm;
 pub mod world;
 
 use turul_ai_catalog::model::{AiCatalog, TrustManifest};

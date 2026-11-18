@@ -5,12 +5,14 @@ use std::fmt;
 
 use turul_ai_catalog::canonical::CanonicalError;
 use turul_ai_catalog::json::{Json, JsonPointer, read};
+use turul_ai_catalog::model::Members;
 use turul_ai_catalog::parse::ParseError;
 use turul_ai_catalog_client::{FetchError, FetchPolicy, Fetched, fetch, media_type_essence};
 use turul_jwt_validator::detached::{DetachedJwsError, Es256PublicKey, check_public_jwk};
 
 use crate::header::Kid;
 use crate::identity::DidWebRoot;
+use crate::sign::{SignError, SignerParams, kid};
 
 const DID_JSON: &str = "application/did+json";
 const DID_LD_JSON: &str = "application/did+ld+json";
@@ -29,6 +31,68 @@ const JSON: &str = "application/json";
 /// ```
 pub fn document_url(root: &DidWebRoot) -> String {
     format!("https://{}/.well-known/did.json", root.domain())
+}
+
+/// Returns the DID document of `signer` that carries `public_jwk` as the verification method
+/// `<signer>#<key_fragment>`, controlled by the signer and authorised by `assertionMethod`.
+/// Serve its canonical bytes as `application/did+json` at [`document_url`].
+///
+/// # Errors
+///
+/// - [`SignError::Kid`] when `key_fragment` is not a non-empty RFC 3986 fragment.
+/// - [`SignError::Key`] when `public_jwk` is not a P-256 public JWK.
+///
+/// # Examples
+///
+/// ```
+/// use turul_ai_catalog_trust::{DidWebRoot, SigningKey, did_document};
+///
+/// let signer = DidWebRoot::parse("did:web:example.com").ok_or("not a root did:web DID")?;
+/// let jwk = SigningKey::generate().public_jwk()?;
+/// let document = did_document(&signer, "key-1", &jwk)?;
+/// let bytes = document.to_canonical_vec()?;
+/// assert!(bytes.starts_with(b"{"));
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+pub fn did_document(
+    signer: &DidWebRoot,
+    key_fragment: &str,
+    public_jwk: &Json,
+) -> Result<Json, SignError> {
+    let params = SignerParams {
+        signer: signer.clone(),
+        key_fragment: key_fragment.to_string(),
+        issued_at: String::new(),
+        expires_at: None,
+    };
+    let method_id = kid(&params)?.as_str().to_string();
+    let jwk_bytes = public_jwk.to_canonical_vec().map_err(|_| SignError::Key)?;
+    check_public_jwk(&jwk_bytes).map_err(|_| SignError::Key)?;
+
+    let text = |s: &str| Json::String(s.to_string());
+    let mut method = Members::default();
+    method.insert("id".into(), text(&method_id));
+    method.insert("type".into(), text("JsonWebKey2020"));
+    method.insert("controller".into(), text(signer.as_str()));
+    method.insert("publicKeyJwk".into(), public_jwk.clone());
+    let mut document = Members::default();
+    document.insert(
+        "@context".into(),
+        Json::Array(vec![
+            text("https://www.w3.org/ns/did/v1"),
+            text("https://w3id.org/security/suites/jws-2020/v1"),
+        ]),
+    );
+    document.insert("id".into(), text(signer.as_str()));
+    document.insert(
+        "verificationMethod".into(),
+        Json::Array(vec![Json::Object(method)]),
+    );
+    document.insert(
+        "assertionMethod".into(),
+        Json::Array(vec![text(&method_id)]),
+    );
+    Ok(Json::Object(document))
 }
 
 /// A DID document that passed [`accept_document`] for its signer.

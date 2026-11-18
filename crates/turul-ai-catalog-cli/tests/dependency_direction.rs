@@ -185,9 +185,11 @@ fn tui_dependencies_are_exactly_the_allowed_set() {
     assert!(dev.is_empty(), "{dev:?}");
 }
 
-// the CLI depends on the format crate, the client, the TUI, the storage crate (listing and
-// removal live there), `clap` and `tokio` (a current-thread runtime to call it). `aws-config` and
-// `aws-sdk-dynamodb` exist only for the DynamoDB backend (feature `dynamodb`).
+// the CLI depends on the format crate, the client, the trust crate (verification, signing and the
+// key store live there), the TUI, the storage crate (listing and removal live there), `clap` and
+// `tokio` (a current-thread runtime to call them). `aws-config` exists only for the DynamoDB
+// backend and the Parameter Store key (features `dynamodb`, `ssm`), `aws-sdk-dynamodb` only for
+// the former and `aws-sdk-ssm` only for the latter. The TUI never depends on the trust crate.
 #[test]
 fn cli_dependencies_are_exactly_the_allowed_set() {
     let (normal, dev) = dependencies("turul-ai-catalog-cli");
@@ -196,17 +198,19 @@ fn cli_dependencies_are_exactly_the_allowed_set() {
         set(&[
             "turul-ai-catalog",
             "turul-ai-catalog-client",
+            "turul-ai-catalog-trust",
             "turul-ai-catalog-tui",
             "turul-ai-catalog-storage",
             "clap",
             "tokio",
             "aws-config",
-            "aws-sdk-dynamodb"
+            "aws-sdk-dynamodb",
+            "aws-sdk-ssm"
         ])
     );
     assert_eq!(
         optional("turul-ai-catalog-cli"),
-        set(&["aws-config", "aws-sdk-dynamodb"])
+        set(&["aws-config", "aws-sdk-dynamodb", "aws-sdk-ssm"])
     );
     assert!(dev.is_empty(), "{dev:?}");
 }
@@ -259,16 +263,22 @@ fn storage_default_features_add_no_runtime_or_network_dependency() {
     assert!(core.is_empty(), "{core:?}");
 }
 
-// the trust crate's `registration` feature adds exactly storage (without its default features,
-// so without a backend), `async-trait` and `tokio` with `rt` only; with it off the crate keeps
-// its default dependency set.
+// the trust crate's optional dependencies are exactly storage (without its default features, so
+// without a backend), `async-trait` and `tokio` with `rt` only (feature `registration`) and
+// `aws-sdk-ssm` (feature `ssm`); with them off the crate keeps its default dependency set, which
+// includes the P-256 key generation (`p256`, `rand_core`).
 #[test]
-fn trust_registration_feature_adds_only_storage_async_trait_and_tokio() {
+fn trust_optional_features_add_only_storage_async_trait_tokio_and_the_ssm_client() {
     let (normal, _) = dependencies("turul-ai-catalog-trust");
     let optional = optional("turul-ai-catalog-trust");
     assert_eq!(
         optional,
-        set(&["turul-ai-catalog-storage", "async-trait", "tokio"])
+        set(&[
+            "turul-ai-catalog-storage",
+            "async-trait",
+            "tokio",
+            "aws-sdk-ssm"
+        ])
     );
     let always: BTreeSet<_> = normal.difference(&optional).cloned().collect();
     assert_eq!(
@@ -277,7 +287,9 @@ fn trust_registration_feature_adds_only_storage_async_trait_and_tokio() {
             "turul-ai-catalog",
             "turul-ai-catalog-client",
             "sha2",
-            "turul-jwt-validator"
+            "turul-jwt-validator",
+            "p256",
+            "rand_core"
         ])
     );
     assert_eq!(

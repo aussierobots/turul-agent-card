@@ -22,6 +22,10 @@ jobs:
       - run: cargo test -p turul-ai-catalog-storage --features sqlite
       - run: cargo clippy -p turul-ai-catalog-trust --features registration --all-targets -- -D warnings
       - run: cargo test -p turul-ai-catalog-trust --features registration
+      - run: cargo clippy -p turul-ai-catalog-trust --features ssm --all-targets -- -D warnings
+      - run: cargo test -p turul-ai-catalog-trust --features ssm
+      - run: cargo clippy -p turul-ai-catalog-cli --features ssm --all-targets -- -D warnings
+      - run: cargo test -p turul-ai-catalog-cli --features ssm
       - run: cargo clippy -p turul-ai-catalog-lambda --features local --all-targets -- -D warnings
       - run: cargo doc --no-deps --workspace
         env:

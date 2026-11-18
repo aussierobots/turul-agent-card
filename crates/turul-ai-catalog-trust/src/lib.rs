@@ -4,9 +4,12 @@
 pub mod accept;
 pub mod did_web;
 pub mod digest;
+pub mod endorse;
 pub mod header;
 pub mod identity;
 pub mod object;
+#[cfg(feature = "ssm")]
+pub mod parameter_store;
 pub mod payload;
 #[cfg(feature = "registration")]
 pub mod registration;
@@ -15,16 +18,19 @@ pub mod sign;
 
 pub use accept::{AcceptedSignature, Reason, TrustPolicy, verify_signature};
 pub use did_web::{
-    DidDocument, KeySelectionError, PublicJwk, ResolveError, accept_document, document_url,
-    resolve, select_key,
+    DidDocument, KeySelectionError, PublicJwk, ResolveError, accept_document, did_document,
+    document_url, resolve, select_key,
 };
-pub use digest::{IntegrityError, Unsupported, compute, verify_artifact};
+pub use digest::{IntegrityError, Unsupported, artifact_digest, compute, verify_artifact};
+pub use endorse::{EndorseError, EndorseErrorKind, endorse_catalog, endorse_entry};
 pub use header::{
     DID_WEB_V1_FORBIDDEN_HEADERS, ES256, HeaderError, Kid, TYP_CATALOG, TYP_TRUST_MANIFEST,
     inspect, kid_matches_signer, policy,
 };
 pub use identity::DidWebRoot;
 pub use object::SignedObject;
+#[cfg(feature = "ssm")]
+pub use parameter_store::{KeyStoreError, ParameterKeyStore};
 pub use payload::{PayloadError, catalog_payload, manifest_payload};
 #[cfg(feature = "registration")]
 pub use registration::{DidWebPublisherVerifier, publisher_verdict};

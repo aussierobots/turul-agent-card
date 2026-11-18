@@ -47,7 +47,7 @@ keeps its own schema, and the catalog adds discovery, publisher and trust inform
 |---|---|
 | [`turul-ai-catalog`](crates/turul-ai-catalog) | Library: the document model, strict parsing, validation with conformance levels, entry name/description/version resolution, RFC 8785 canonical JSON (a number RFC 8785 rounds to another value, such as `9007199254740993`, is written in its RFC 8785 form and reported as a `number-inexact` warning). No runtime dependencies. |
 | [`turul-ai-catalog-client`](crates/turul-ai-catalog-client) | Library: create catalog files, load catalogs from a file, a URL or a domain's well-known URI under the spec's Safe Fetching rules, and follow nested catalogs into one tree. |
-| [`turul-ai-catalog-cli`](crates/turul-ai-catalog-cli) | The `turul-ai-catalog` binary: `init`, `add`, `remove`, `validate`, `list`, `view`. |
+| [`turul-ai-catalog-cli`](crates/turul-ai-catalog-cli) | The `turul-ai-catalog` binary: `init`, `add`, `remove`, `validate`, `list`, `view`, `store`, `verify`, and with feature `ssm` `key` and `sign`. |
 | [`turul-ai-catalog-tui`](crates/turul-ai-catalog-tui) | The terminal catalog browser behind `turul-ai-catalog view` ([ratatui](https://ratatui.rs)). |
 | [`turul-ai-catalog-trust`](crates/turul-ai-catalog-trust) | Trust Manifests: signed payloads, artifact digests, ES256 signing and `did:web` verification, through [turul-jwt-validator](https://github.com/aussierobots/turul-jwt-validator). |
 | [`turul-ai-catalog-storage`](crates/turul-ai-catalog-storage) | Library: entry-level catalog storage with content-derived ETags and conditional writes, assembly of the served document, and `import` of a catalog file. Backends `in-memory` (default), `sqlite`, `postgres` and `dynamodb` as features. |

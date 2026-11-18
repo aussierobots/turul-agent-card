@@ -2,6 +2,10 @@
 
 use std::fmt;
 
+use p256::SecretKey;
+use p256::pkcs8::{DecodePrivateKey, EncodePrivateKey};
+use rand_core::OsRng;
+use turul_ai_catalog::json::{Json, read};
 use turul_ai_catalog::model::{AiCatalog, CatalogEntry, Signature, Subject, TrustManifest};
 use turul_ai_catalog::validate::{Code, DID_WEB_V1, Severity, validate, validate_manifest};
 use turul_jwt_validator::detached::sign_detached_es256;
@@ -11,12 +15,78 @@ use crate::identity::DidWebRoot;
 use crate::payload::{PayloadError, catalog_payload, manifest_payload};
 
 /// A PKCS#8 DER ES256 private key. The validator parses it at sign time.
+///
+/// The bytes have no public accessor: the private key leaves the process only through a key
+/// store.
 pub struct SigningKey(Vec<u8>);
 
 impl SigningKey {
     /// Wraps PKCS#8 DER bytes; the key is parsed when a signature is made, not here.
     pub fn from_pkcs8_der(der: &[u8]) -> Self {
         Self(der.to_vec())
+    }
+
+    /// Draws a fresh P-256 key from the operating system's random source.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use turul_ai_catalog_trust::SigningKey;
+    ///
+    /// let key = SigningKey::generate();
+    /// let jwk = key.public_jwk()?;
+    /// # let _ = jwk;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn generate() -> Self {
+        let der = SecretKey::random(&mut OsRng)
+            .to_pkcs8_der()
+            .expect("a P-256 key encodes as PKCS#8");
+        Self(der.as_bytes().to_vec())
+    }
+
+    /// Returns the public key as a JWK object with exactly `kty`, `crv`, `x` and `y`, and never
+    /// `d`.
+    ///
+    /// # Errors
+    ///
+    /// [`SignError::Key`] when the bytes are not a P-256 PKCS#8 key.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use turul_ai_catalog::json::Json;
+    /// use turul_ai_catalog_trust::SigningKey;
+    ///
+    /// let Json::Object(jwk) = SigningKey::generate().public_jwk()? else {
+    ///     unreachable!("a JWK is an object");
+    /// };
+    /// assert_eq!(jwk.len(), 4);
+    /// assert!(jwk.get("d").is_none());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn public_jwk(&self) -> Result<Json, SignError> {
+        let secret = SecretKey::from_pkcs8_der(&self.0).map_err(|_| SignError::Key)?;
+        let text = secret.public_key().to_jwk_string();
+        read(text.as_bytes()).map_err(|_| SignError::Key)
+    }
+
+    /// The PKCS#8 PEM of the key, for a key store.
+    #[cfg(feature = "ssm")]
+    pub(crate) fn to_pem(&self) -> Result<String, SignError> {
+        let secret = SecretKey::from_pkcs8_der(&self.0).map_err(|_| SignError::Key)?;
+        secret
+            .to_pkcs8_pem(Default::default())
+            .map(|pem| pem.to_string())
+            .map_err(|_| SignError::Key)
+    }
+
+    /// Parses a P-256 PKCS#8 PEM.
+    #[cfg(feature = "ssm")]
+    pub(crate) fn from_pem(pem: &str) -> Result<Self, SignError> {
+        let secret = SecretKey::from_pkcs8_pem(pem).map_err(|_| SignError::Key)?;
+        let der = secret.to_pkcs8_der().map_err(|_| SignError::Key)?;
+        Ok(Self(der.as_bytes().to_vec()))
     }
 }
 
@@ -88,7 +158,7 @@ impl From<PayloadError> for SignError {
     }
 }
 
-fn kid(params: &SignerParams) -> Result<Kid, SignError> {
+pub(crate) fn kid(params: &SignerParams) -> Result<Kid, SignError> {
     let kid = format!("{}#{}", params.signer.as_str(), params.key_fragment);
     Kid::parse(&kid, &params.signer).ok_or(SignError::Kid)
 }
